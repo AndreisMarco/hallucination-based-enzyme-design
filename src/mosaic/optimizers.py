@@ -13,25 +13,17 @@ from mosaic.logger import TrajectoryLogger, aux_to_wandb
 AbstractLoss = LossTerm | LinearCombination
 
 
-def _print_iter(iter, aux, v):
-    # first filter out anything that isn't a float or has number of dimensions > 0
-    aux = eqx.filter(
-        aux,
-        lambda v: isinstance(v, float | str) or v.shape == (),
-    )
-    print(
-        iter,
-        f"loss: {v:0.2f}",
-        " ".join(
-            f"{jax.tree_util.keystr(k, simple=True, separator='.')}:{v: 0.2f}"
-            for (k, v) in jax.tree_util.tree_leaves_with_path(aux)
-            if hasattr(v, "item")
-            or isinstance(v, float)
-            and (
-                "state_index" not in jax.tree_util.keystr(k, simple=True, separator=".")
-            )
-        ),
-    )
+def _print_iter(i, aux):
+    """Print scalar metrics from aux to the terminal."""
+    def is_scalar_float(x):
+        return isinstance(x, (float, jax.Array, np.ndarray)) and jnp.ndim(x) == 0
+    metrics = {
+        jax.tree_util.keystr(k, simple=True, separator='.'): float(v)
+        for k, v in jax.tree_util.tree_leaves_with_path(aux)
+        if is_scalar_float(v)
+        and "state_index" not in jax.tree_util.keystr(k, simple=True, separator=".")
+    }
+    print(i, " | ".join(f"{k:<5}: {v:>10.2f}" for k, v in metrics.items()))
 
 
 # Split this up so changing optim parameters doesn't trigger re-compilation of loss function
@@ -260,7 +252,7 @@ class PSSMOptimizer(ABC):
 
         # logging settings
         self.log_trajectory = log_trajectory
-        self.logger = TrajectoryLogger() if log_trajectory else None
+        self.logger = None
         self.use_wandb = use_wandb
 
     @abstractmethod
@@ -276,9 +268,15 @@ class PSSMOptimizer(ABC):
             update_mask: Bool[Array, "N"] | None = None, 
             wandb_project: str = "pssm_optimization"):
         
+        if self.log_trajectory: 
+            self.logger = TrajectoryLogger()
+
         if self.use_wandb: 
             wandb.login()
+            # Log all optimizer settings
             config = {k: v for k, v in vars(self).items() if isinstance(v, (int, float, str, bool))}
+            # Log loss weights
+            config.update({{f"{str(l).strip('()')} weight": float(w) for l,w in zip(self.loss_fn.l, self.loss_fn.weights)}})
             wandb.init(
                 project=wandb_project, 
                 config=config
