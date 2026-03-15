@@ -34,6 +34,16 @@ class StructurePrediction(eqx.Module):
     pae: Float[Array, "N N"]
     iptm: float
 
+    def save_pdb(self, path: str):
+        idx = 0
+        for model in self.st:
+            for chain in model:
+                for residue in chain:
+                    for atom in residue:
+                        atom.b_iso = float(self.plddt[idx])
+                    idx += 1
+        self.st.write_pdb(path)
+
 
 class StructurePredictionModel(eqx.Module):
     @abstractmethod
