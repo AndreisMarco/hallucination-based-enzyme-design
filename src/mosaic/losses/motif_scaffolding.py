@@ -8,108 +8,6 @@ from mosaic.common import LossTerm, restype_three_to_one, TOKENS
 from mosaic.structure_prediction import AbstractStructureOutput
 from mosaic.util import kabsch, gram_schmidt
 
-class DistogramCCE(LossTerm):
-    gt_distogram: Float[Array, "N N"]
-    mask: Float[Array, "N"]
-    _idx: Float[Array, "M"]
-
-    def __init__(self, gt_distogram, mask):
-        self.gt_distogram = gt_distogram
-        self.mask = mask
-        self._idx = jnp.where(mask, size=int(mask.sum()))[0]
-
-    def __call__(
-        self,
-        sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
-        key,
-    ):
-        # Only keep scaffold positions
-        pred_logits  = output.distogram_logits[self._idx][:, self._idx]  
-        gt_distogram = self.gt_distogram[self._idx][:, self._idx]        
-        bins = output.distogram_bins
-        # Turn ground-truth to one-hot
-        gt_indices = jnp.digitize(gt_distogram, bins)
-        gt_indices = jnp.clip(gt_indices, 0, pred_logits.shape[-1] - 1)
-        gt_one_hot = nn.one_hot(gt_indices, num_classes=pred_logits.shape[-1])
-        
-        # Compute CCE
-        loss = -jnp.sum(gt_one_hot * nn.log_softmax(pred_logits, axis=-1), axis=-1)
-        dgramm_cce = jnp.mean(loss)
-        return dgramm_cce, {"dgramm_cce": dgramm_cce}
-
-class FAPE(LossTerm):
-    gt_t: Float[Array, "N 3"]
-    gt_R: Float[Array, "N 3 3"]
-    mask: Float[Array, "N"]
-    _idx: Float[Array, "M"]
-
-    def __init__(self, gt_t, gt_R, mask):
-        self.gt_t = gt_t
-        self.gt_R = gt_R
-        self.mask = mask
-        self._idx = jnp.where(mask, size=int(mask.sum()))[0]
-
-    def __call__(
-        self,
-        sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
-        key,
-    ):
-        def robust_norm(x, eps=1e-8):
-            return jnp.sqrt(jnp.square(x).sum(axis=-1) + eps)
-
-        def get_ij(R, t):
-            return jnp.einsum("rji, rsj -> rsi", R, t[None, :] - t[:, None])
-
-        # Only keep scaffold positions
-        pred_bb = output.backbone_coordinates[self._idx] 
-        gt_R    = self.gt_R[self._idx]                    
-        gt_t    = self.gt_t[self._idx]                    
-
-        # Compute rotation on prediction backbones
-        pred_R = gram_schmidt(
-            v1=pred_bb[:, 2, :] - pred_bb[:, 1, :],   # CA -> C
-            v2=pred_bb[:, 0, :] - pred_bb[:, 1, :],   # CA -> N
-        )
-        pred_t = pred_bb[:, 1, :]
-        pred_ij = get_ij(pred_R, pred_t)
-        gt_ij = get_ij(gt_R, gt_t)
-
-        # Compute FAPE
-        fape = robust_norm(pred_ij - gt_ij)
-        fape = jnp.clip(fape, 0.0, 10.0) / 10.0
-        fape = fape.mean()
-
-        return fape, {"fape": fape}
-
-class RMSD(LossTerm):
-    gt_coords: Float[Array, "N 4 3"]
-    mask:      Float[Array, "N"]
-    _idx:      Float[Array, "M"]
-
-    def __init__(self, gt_coords, mask):
-        self.gt_coords = gt_coords
-        self.mask      = mask
-        self._idx      = jnp.where(mask, size=int(mask.sum()))[0]
-
-    def __call__(
-        self,
-        sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
-        key,
-    ):
-        # Only keep scaffold positions
-        pred_bb = output.backbone_coordinates[self._idx] 
-        gt_bb = self.gt_coords[self._idx]               
-        # Align pred to gt
-        pred = pred_bb.reshape(-1, 3)
-        gt = gt_bb.reshape(-1, 3)
-        R, t = kabsch(pred, gt)
-        pred_aligned = pred @ R + t
-        # Compute RMSD
-        rmsd = jnp.sqrt(jnp.mean(jnp.sum((pred_aligned - gt) ** 2, axis=-1)))
-        return rmsd, {"scaffold_rmsd": rmsd}
     
 import biotite.structure as struct
 from biotite.structure.io import pdb, pdbx
@@ -265,18 +163,131 @@ class Scaffold():
         onehot = jax.nn.one_hot(aa_indices, num_classes=20)
         return jnp.where(self.mask[:, None], onehot, pssm)
     
+class DistogramCCE(LossTerm):
+    gt_distogram: Float[Array, "N N"]
+    mask: Float[Array, "N"]
+    _idx: Float[Array, "M"]
 
-    
+    def __init__(self, gt_distogram, mask):
+        self.gt_distogram = gt_distogram
+        self.mask = mask
+        self._idx = jnp.where(mask, size=int(mask.sum()))[0]
+
+    @classmethod
+    def from_scaffold(cls, scaffold: Scaffold):
+        return cls(gt_distogram=scaffold.distogram(), mask=scaffold.mask)
+
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: AbstractStructureOutput,
+        key,
+    ):
+        # Only keep scaffold positions
+        pred_logits  = output.distogram_logits[self._idx][:, self._idx]  
+        gt_distogram = self.gt_distogram[self._idx][:, self._idx]        
+        bins = output.distogram_bins
+        # Turn ground-truth to one-hot
+        gt_indices = jnp.digitize(gt_distogram, bins)
+        gt_indices = jnp.clip(gt_indices, 0, pred_logits.shape[-1] - 1)
+        gt_one_hot = nn.one_hot(gt_indices, num_classes=pred_logits.shape[-1])
+        
+        # Compute CCE
+        loss = -jnp.sum(gt_one_hot * nn.log_softmax(pred_logits, axis=-1), axis=-1)
+        dgramm_cce = jnp.mean(loss)
+        return dgramm_cce, {"dgramm_cce": dgramm_cce}
+
+class FAPE(LossTerm):
+    gt_t: Float[Array, "N 3"]
+    gt_R: Float[Array, "N 3 3"]
+    mask: Float[Array, "N"]
+    _idx: Float[Array, "M"]
+
+    def __init__(self, gt_t, gt_R, mask):
+        self.gt_t = gt_t
+        self.gt_R = gt_R
+        self.mask = mask
+        self._idx = jnp.where(mask, size=int(mask.sum()))[0]
+
+    @classmethod
+    def from_scaffold(cls, scaffold: Scaffold):
+        gt_t, gt_R = scaffold.backbone_frames()
+        return cls(gt_t=gt_t, gt_R=gt_R, mask=scaffold.mask)
+
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: AbstractStructureOutput,
+        key,
+    ):
+        def robust_norm(x, eps=1e-8):
+            return jnp.sqrt(jnp.square(x).sum(axis=-1) + eps)
+
+        def get_ij(R, t):
+            return jnp.einsum("rji, rsj -> rsi", R, t[None, :] - t[:, None])
+
+        # Only keep scaffold positions
+        pred_bb = output.backbone_coordinates[self._idx] 
+        gt_R    = self.gt_R[self._idx]                    
+        gt_t    = self.gt_t[self._idx]                    
+
+        # Compute rotation on prediction backbones
+        pred_R = gram_schmidt(
+            v1=pred_bb[:, 2, :] - pred_bb[:, 1, :],   # CA -> C
+            v2=pred_bb[:, 0, :] - pred_bb[:, 1, :],   # CA -> N
+        )
+        pred_t = pred_bb[:, 1, :]
+        pred_ij = get_ij(pred_R, pred_t)
+        gt_ij = get_ij(gt_R, gt_t)
+
+        # Compute FAPE
+        fape = robust_norm(pred_ij - gt_ij)
+        fape = jnp.clip(fape, 0.0, 10.0) / 10.0
+        fape = fape.mean()
+
+        return fape, {"fape": fape}
+
+class RMSD(LossTerm):
+    gt_coords: Float[Array, "N 4 3"]
+    mask:      Float[Array, "N"]
+    _idx:      Float[Array, "M"]
+
+    def __init__(self, gt_coords, mask):
+        self.gt_coords = gt_coords
+        self.mask      = mask
+        self._idx      = jnp.where(mask, size=int(mask.sum()))[0]
+
+    @classmethod
+    def from_scaffold(cls, scaffold: Scaffold):
+        return cls(gt_coords=scaffold.backbone_coordinates(), mask=scaffold.mask)
+
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: AbstractStructureOutput,
+        key,
+    ):
+        # Only keep scaffold positions
+        pred_bb = output.backbone_coordinates[self._idx] 
+        gt_bb = self.gt_coords[self._idx]               
+        # Align pred to gt
+        pred = pred_bb.reshape(-1, 3)
+        gt = gt_bb.reshape(-1, 3)
+        R, t = kabsch(pred, gt)
+        pred_aligned = pred @ R + t
+        # Compute RMSD
+        rmsd = jnp.sqrt(jnp.mean(jnp.sum((pred_aligned - gt) ** 2, axis=-1)))
+        return rmsd, {"scaffold_rmsd": rmsd}
 
 if __name__ == "__main__":
     scaffold = Scaffold(
-        path_to_structure="../structures/1LNS.cif",
-        keep_intervals=[(348,358), (461,468), (498,498)],
+        path_to_structure="structures/1LNS.cif",
+        keep_intervals="348-358,461-468,498-498",
         order=[0,2,1],
         loops=[5,4,6,6]
     )
 
-    print(len(scaffold))
+    print("len scaffold:", len(scaffold))
     print("full sequence:", scaffold.sequence)
     print("mask shape:", scaffold.mask.shape)
     print("distogram shape:", scaffold.distogram().shape)
@@ -296,11 +307,10 @@ if __name__ == "__main__":
         distogram_bins=bins,
     )
 
-    gt_t, gt_R = scaffold.backbone_frames()
     structure_loss = (
-        RMSD(gt_coords=scaffold.backbone_coordinates(), mask=scaffold.mask) +
-        FAPE(gt_t=gt_t, gt_R=gt_R, mask=scaffold.mask) +
-        DistogramCCE(gt_distogram=scaffold.distogram(), mask=scaffold.mask)
+        RMSD.from_scaffold(scaffold=scaffold) +
+        FAPE.from_scaffold(scaffold=scaffold) +
+        DistogramCCE.from_scaffold(scaffold=scaffold)
     )
 
     v, aux = structure_loss(
