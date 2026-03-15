@@ -164,32 +164,24 @@ class TrajectoryLogger:
         if self.trajectory is None:
             self.clean_trajectory()
 
-        # Create timestamped run folder
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        model_name = self.trajectory["model"]
-        run_dir = os.path.join(log_path, f"{model_name}_{timestamp}")
-        os.makedirs(run_dir, exist_ok=True)
-
         # Save trajectory
-        with open(os.path.join(run_dir, "trajectory.pkl"), "wb") as f:
+        with open(os.path.join(log_path, "trajectory.pkl"), "wb") as f:
             pickle.dump(self.trajectory, f)
 
         # Save plot of losses
         if save_loss_plot:
             fig = plot_losses(loss=self.trajectory["optim"]["loss"],
                                  additional_losses =self.trajectory["losses"])
-            fig.savefig(os.path.join(run_dir, "losses.png"))
+            fig.savefig(os.path.join(log_path, "losses.png"))
             plt.close(fig)
 
         # Save pssm evolution video
         if save_pssm_video:
             make_pssm_video(
                 self.trajectory["optim"]["pssm"],
-                output_path=os.path.join(run_dir, "pssm_evolution.mp4"),
+                output_path=os.path.join(log_path, "pssm_evolution.mp4"),
             )
-
-        print(f"Saved logs to: {run_dir}")
-        return run_dir
+        print(f"Saved logs to: {log_path}")
 
 def aux_to_wandb(aux):
     log = {}
