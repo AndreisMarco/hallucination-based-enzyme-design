@@ -139,6 +139,10 @@ class Boltz2(StructurePredictionModel):
     def binder_features(binder_length, chains: list[TargetChain]):
         return binder_features(binder_length, chains)
 
+    def binder_only_features(self, binder_length):
+        binder = TargetChain(sequence="X" * binder_length, use_msa=False)
+        self.target_only_features([binder])
+ 
     def build_loss(self, *, loss, features, recycling_steps=1, sampling_steps=None):
         return Boltz2Loss(
             joltz2=self.model,

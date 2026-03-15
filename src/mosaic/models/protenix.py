@@ -58,6 +58,10 @@ class Protenix(StructurePredictionModel):
         )
 
         return features_dict, atom_array
+    
+    def binder_only_features(self, binder_length):
+        binder = TargetChain(sequence="X" * binder_length, use_msa=False)
+        return self.target_only_features(chains=[binder])
 
     def binder_features(self, binder_length, chains: list[TargetChain]):
         binder = TargetChain(sequence="X" * binder_length, use_msa=False)
