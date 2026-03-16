@@ -163,6 +163,9 @@ class TrajectoryLogger:
         log_path = Path(log_path)
         if not log_path.exists():
            log_path.mkdir(parents=True, exist_ok=True) 
+        
+        if self.trajectory is None:
+            self.clean_trajectory()
 
         # Save final sequence
         final_pssm = self.trajectory["optim"]["pssm"][-1]
@@ -170,9 +173,6 @@ class TrajectoryLogger:
         tokens_arr = np.array(list(TOKENS))
         final_sequence = "".join(tokens_arr[final_idxs])
         (log_path / "sequence.txt").write_text(final_sequence)
-
-        if self.trajectory is None:
-            self.clean_trajectory()
 
         # Save trajectory
         (log_path / "trajectory.pkl").write_bytes(pickle.dumps(self.trajectory))
