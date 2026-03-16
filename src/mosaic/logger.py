@@ -1,6 +1,4 @@
-import os
-from datetime import datetime
-
+from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -159,28 +157,42 @@ class TrajectoryLogger:
         if not keep_trajectory_list:
             self.trajectory_list = None
 
-    def save(self, log_path: str, save_loss_plot: bool = True, save_pssm_video: bool = True):
+    def save(self, log_path: Path, save_loss_plot: bool = True, save_pssm_video: bool = True):
         import pickle
+
+        log_path = Path(log_path)
+        if not log_path.exists():
+           log_path.mkdir(parents=True, exist_ok=True) 
+
+        # Save final sequence
+        final_pssm = self.trajectory["optim"]["pssm"][-1]
+        final_idxs = np.array(jnp.argmax(final_pssm, axis=-1))
+        tokens_arr = np.array(list(TOKENS))
+        final_sequence = "".join(tokens_arr[final_idxs])
+        (log_path / "sequence.txt").write_text(final_sequence)
+
         if self.trajectory is None:
             self.clean_trajectory()
 
         # Save trajectory
-        with open(os.path.join(log_path, "trajectory.pkl"), "wb") as f:
-            pickle.dump(self.trajectory, f)
+        (log_path / "trajectory.pkl").write_bytes(pickle.dumps(self.trajectory))
 
         # Save plot of losses
         if save_loss_plot:
-            fig = plot_losses(loss=self.trajectory["optim"]["loss"],
-                                 additional_losses =self.trajectory["losses"])
-            fig.savefig(os.path.join(log_path, "losses.png"))
+            fig = plot_losses(
+                loss=self.trajectory["optim"]["loss"],
+                additional_losses=self.trajectory["losses"],
+            )
+            fig.savefig(log_path / "losses.png")
             plt.close(fig)
 
         # Save pssm evolution video
         if save_pssm_video:
             make_pssm_video(
                 self.trajectory["optim"]["pssm"],
-                output_path=os.path.join(log_path, "pssm_evolution.mp4"),
+                output_path=log_path / "pssm_evolution.mp4",
             )
+
         print(f"Saved logs to: {log_path}")
 
 def aux_to_wandb(aux):
