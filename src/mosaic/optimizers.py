@@ -255,10 +255,14 @@ class PSSMOptimizer(ABC):
         self.logger = None
         self.use_wandb = use_wandb
 
+        # keep wandb state to allow resume 
+        self.wandb_run_id: str | None = None
+        self.wandb_step_offset: int = 0
+
     @abstractmethod
     def step(self, state, key):
         """
-        Optimizer specifc step 
+        Optimizer specific step 
         """
         pass
 
@@ -266,22 +270,30 @@ class PSSMOptimizer(ABC):
             pssm_init: Float[Array, "N 20"],
             key,
             update_mask: Bool[Array, "N"] | None = None, 
-            wandb_project: str = "pssm_optimization"):
+            wandb_project: str = "pssm_optimization",
+            resume: bool = False):
         
         if self.log_trajectory: 
             self.logger = TrajectoryLogger()
 
-        if self.use_wandb: 
+        if self.use_wandb:
             wandb.login()
-            # Log all optimizer settings
+            # Collect config as optimizer scalars and loss weights
             config = {k: v for k, v in vars(self).items() if isinstance(v, (int, float, str, bool))}
-            # Log loss weights
-            config.update({{f"{str(l).strip('()')} weight": float(w) for l,w in zip(self.loss_fn.l, self.loss_fn.weights)}})
-            wandb.init(
-                project=wandb_project, 
-                config=config
+            config.update({f"{str(l).strip('()')} weight": float(w) for l, w in zip(self.loss_fn.loss.l, self.loss_fn.loss.weights)})
+
+            if resume and self.wandb_run_id is not None:
+                wandb.init(
+                    project=wandb_project,
+                    id=self.wandb_run_id,
+                    resume="allow",
                 )
-        
+                wandb.config.update(config, allow_val_change=True)
+            else:
+                wandb.init(project=wandb_project, config=config)
+                self.wandb_run_id = wandb.run.id
+                self.wandb_step_offset = 0
+
         if update_mask is None:
             update_mask = jnp.ones(shape=(pssm_init.shape[0]), dtype=bool)
         
@@ -317,16 +329,17 @@ class PSSMOptimizer(ABC):
                 self.logger.update(aux)
 
             if self.use_wandb:
-                wandb.log(aux_to_wandb(aux))
+                wandb.log(aux_to_wandb(aux), step=self.wandb_step_offset + i)
 
             # Update best
             if loss < best_loss and not np.isnan(loss):
                 best_pssm = state["x"]
             # Log to terminal
             _print_iter(i, aux)
-    
+
         if self.use_wandb:
-                wandb.finish()
+            wandb.finish()
+            self.wandb_step_offset += self.n_steps
 
         if self.log_trajectory:
             self.logger.clean_trajectory()
