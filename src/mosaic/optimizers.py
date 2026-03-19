@@ -240,7 +240,7 @@ class PSSMOptimizer(ABC):
                 sample_loss: bool = False,
                 use_wandb: bool = False):
 
-        # optimization settings
+        # ptimization settings
         self.loss_fn = loss_fn
         self.n_steps = n_steps
         self.max_gradient_norm = max_gradient_norm
@@ -255,14 +255,15 @@ class PSSMOptimizer(ABC):
         self.logger = None
         self.use_wandb = use_wandb
 
-        # keep wandb state to allow resume 
+        # wandb resume state 
         self.wandb_run_id: str | None = None
         self.wandb_step_offset: int = 0
+        self.wandb_run_count: int = 0
 
     @abstractmethod
     def step(self, state, key):
         """
-        Optimizer specific step 
+        Optimizer specifc step 
         """
         pass
 
@@ -278,7 +279,7 @@ class PSSMOptimizer(ABC):
 
         if self.use_wandb:
             wandb.login()
-            # Collect config as optimizer scalars and loss weights
+            # Collect config as optimizer scalars + loss weights
             config = {k: v for k, v in vars(self).items() if isinstance(v, (int, float, str, bool))}
             config.update({f"{str(l).strip('()')} weight": float(w) for l, w in zip(self.loss_fn.loss.l, self.loss_fn.loss.weights)})
 
@@ -288,11 +289,15 @@ class PSSMOptimizer(ABC):
                     id=self.wandb_run_id,
                     resume="allow",
                 )
-                wandb.config.update(config, allow_val_change=True)
+                wandb.config.update(
+                    {f"run_{self.wandb_run_count}": config},
+                    allow_val_change=True
+                )
             else:
-                wandb.init(project=wandb_project, config=config)
+                wandb.init(project=wandb_project, config={"run_0": config})
                 self.wandb_run_id = wandb.run.id
                 self.wandb_step_offset = 0
+                self.wandb_run_count = 0
 
         if update_mask is None:
             update_mask = jnp.ones(shape=(pssm_init.shape[0]), dtype=bool)
@@ -340,6 +345,7 @@ class PSSMOptimizer(ABC):
         if self.use_wandb:
             wandb.finish()
             self.wandb_step_offset += self.n_steps
+            self.wandb_run_count += 1
 
         if self.log_trajectory:
             self.logger.clean_trajectory()
