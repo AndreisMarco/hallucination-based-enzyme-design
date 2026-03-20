@@ -157,6 +157,8 @@ class TrajectoryLogger:
         if not keep_trajectory_list:
             self.trajectory_list = None
 
+        return self.trajectory
+
     def save(self, log_path: Path, save_loss_plot: bool = True, save_pssm_video: bool = True):
         import pickle
 
