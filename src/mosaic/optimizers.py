@@ -341,118 +341,6 @@ class MultiPhaseOptimization:
         for phase in self.phases:
             config[phase.name] = phase.optimizer.make_wandb_config()
         return config
-
-
-def simplex_APGM(
-    *,
-    loss_function,
-    x: Float[Array, "N 20"],
-    n_steps: int,
-    stepsize: float,
-    momentum: float = 0.0,
-    key=None,
-    max_gradient_norm: float | None = None,
-    update_loss_state: bool = False,
-    scale=1.0,
-    trajectory_fn: Callable | None = None,
-    logspace: bool = False,
-    serial_evaluation: bool = False,
-    sample_loss: bool = False,
-):
-    """
-    Accelerated projected gradient descent on the simplex.
-
-    Args:
-    - loss_function: function to minimize
-    - x: initial sequence
-    - n_steps: number of optimization steps
-    - stepsize: step size for gradient descent
-    - momentum: momentum factor
-    - key: jax random key
-    - max_gradient_norm: maximum norm of the gradient
-    - update_loss_state: whether to update the loss function state
-    - scale: proximal scaling factor for L2 regularization (or entropic regularization if logspace=True), set to > 1.0 to encourage sparsity
-    - trajectory_fn: function to compute trajectory information, takes (aux, x) and returns any value.
-    - logspace: whether to optimize in log space, which corresponds to a bregman proximal algorithm.
-
-    returns:
-    - x: final soft sequence after optimization
-    - best_x: best soft sequence found during optimization
-    - trajectory: list of trajectory information if `trajectory_fn` is provided, otherwise nothing.
-    """
-
-    if max_gradient_norm is None:
-        max_gradient_norm = np.sqrt(x.shape[0])
-
-    if key is None:
-        key = jax.random.key(np.random.randint(0, 10000))
-
-    best_val = np.inf
-    x = projection_simplex(x) if not logspace else x
-    best_x = x
-
-    x_prev = x
-
-    trajectory = []
-
-    for _iter in range(n_steps):
-        start_time = time.time()
-        v = jax.device_put(x + momentum * (x - x_prev))
-        (value, aux), g = _eval_loss_and_grad(
-            x=v if not logspace else jax.nn.softmax(v),
-            loss_function=loss_function,
-            key=key,
-            serial_evaluation=serial_evaluation,
-            sample_loss=sample_loss,
-        )
-
-        n = np.sqrt((g**2).sum())
-        if n > max_gradient_norm:
-            g = g * (max_gradient_norm / n)
-
-        key = jax.random.fold_in(key, 0)
-
-        if logspace:
-            x_new = scale * (v - stepsize * g)
-        else:
-            x_new = projection_simplex(scale * (v - stepsize * g))
-
-        x_prev = x
-        x = x_new
-
-        if value < best_val and not np.isnan(value):
-            best_val = value
-            best_x = (
-                x  # this isn't exactly right, because we evaluated loss at v, not x.
-            )
-
-        average_nnz = (
-            (x > 0.01).sum(-1).mean()
-            if not logspace
-            else (jax.nn.softmax(x) > 0.01).sum(-1).mean()
-        )
-
-        # add loss and NNZ to aux
-        if update_loss_state:
-            loss_function = update_states(aux, loss_function)
-
-        aux = {"loss": value, "nnz": average_nnz, "time": (time.time()-start_time), "": aux}
-        if trajectory_fn is not None:
-            trajectory.append(trajectory_fn(aux, x))
-
-        _print_iter(
-            _iter,
-            aux,
-        )
-
-    if logspace:
-        x = jax.nn.softmax(x)
-        best_x = jax.nn.softmax(best_x)
-
-    if trajectory_fn is None:
-        return x, best_x
-    else:
-        return x, best_x, trajectory
     
 # def _proposal(sequence, g, temp, alphabet_size: int = 20):
 #     input = jax.nn.one_hot(sequence, alphabet_size)
@@ -461,123 +349,123 @@ def simplex_APGM(
 #     return jax.nn.softmax(logits), jax.nn.log_softmax(logits)
 
 # rewrite in numpy to use float64
-# from scipy.special import softmax, log_softmax 
-# def _proposal(sequence, g, temp, alphabet_size: int = 20):
-#     input = np.eye(alphabet_size)[sequence]
-#     g_i_x_i = (g * input).sum(-1, keepdims=True)
-#     logits = -((input * g).sum(-1, keepdims=True) - g_i_x_i + g) / temp
-#     return softmax(logits, axis=-1), log_softmax(logits, axis=-1)
+from scipy.special import softmax, log_softmax 
+def _proposal(sequence, g, temp, alphabet_size: int = 20):
+    input = np.eye(alphabet_size)[sequence]
+    g_i_x_i = (g * input).sum(-1, keepdims=True)
+    logits = -((input * g).sum(-1, keepdims=True) - g_i_x_i + g) / temp
+    return softmax(logits, axis=-1), log_softmax(logits, axis=-1)
 
 
-# def gradient_MCMC(
-#     loss,
-#     sequence: Int[Array, "N"],
-#     temp=0.001,
-#     proposal_temp=0.01,
-#     max_path_length=2,
-#     steps=50,
-#     alphabet_size: int = 20,
-#     key: None = None,
-#     detailed_balance: bool = False,
-#     fix_loss_key: bool = True,
-#     serial_evaluation: bool = False,
-# ):
-#     """
-#     Implements the gradient-assisted MCMC sampler from "Plug & Play Directed Evolution of Proteins with
-#     Gradient-based Discrete MCMC." Uses first-order taylor approximation of the loss to propose mutations.
+def gradient_MCMC(
+    loss,
+    sequence: Int[Array, "N"],
+    temp=0.001,
+    proposal_temp=0.01,
+    max_path_length=2,
+    steps=50,
+    alphabet_size: int = 20,
+    key: None = None,
+    detailed_balance: bool = False,
+    fix_loss_key: bool = True,
+    serial_evaluation: bool = False,
+):
+    """
+    Implements the gradient-assisted MCMC sampler from "Plug & Play Directed Evolution of Proteins with
+    Gradient-based Discrete MCMC." Uses first-order taylor approximation of the loss to propose mutations.
 
-#         WARNING: Fixes random seed used for loss evaluation.
+        WARNING: Fixes random seed used for loss evaluation.
 
-#     Args:
-#     - loss: log-probability/function to minimize
-#     - sequence: initial sequence
-#     - proposal_temp: temperature of the proposal distribution
-#     - temp: temperature for the loss function
-#     - max_path_length: maximum number of mutations per step
-#     - steps: number of optimization steps
-#     - key: jax random key
-#     - detailed_balance: whether to maintain detailed balance
+    Args:
+    - loss: log-probability/function to minimize
+    - sequence: initial sequence
+    - proposal_temp: temperature of the proposal distribution
+    - temp: temperature for the loss function
+    - max_path_length: maximum number of mutations per step
+    - steps: number of optimization steps
+    - key: jax random key
+    - detailed_balance: whether to maintain detailed balance
 
-#     """
+    """
 
-#     if key is None:
-#         key = jax.random.key(np.random.randint(0, 10000))
+    if key is None:
+        key = jax.random.key(np.random.randint(0, 10000))
 
-#     key_model = key
-#     (v_0, aux_0), g_0 = _eval_loss_and_grad(
-#         loss, jax.nn.one_hot(sequence, alphabet_size), key=key_model, serial_evaluation=serial_evaluation
-#     )
-#     for iter in range(steps):
-#         start_time = time.time()
-#         ### generate a proposal
+    key_model = key
+    (v_0, aux_0), g_0 = _eval_loss_and_grad(
+        loss, jax.nn.one_hot(sequence, alphabet_size), key=key_model, serial_evaluation=serial_evaluation
+    )
+    for iter in range(steps):
+        start_time = time.time()
+        ### generate a proposal
 
-#         for i in range(50):
-#             proposal = sequence.copy()
-#             mutations = []
-#             log_q_forward = 0.0
-#             path_length = jax.random.randint(
-#                 key=jax.random.key(np.random.randint(10000)),
-#                 minval=1,
-#                 maxval=max_path_length + 1,
-#                 shape=(),
-#             )
-#             key = jax.random.fold_in(key, 0)
-#             for _ in range(path_length):
-#                 p, log_p = _proposal(proposal, g_0, proposal_temp, alphabet_size=alphabet_size)
-#                 mut_idx = jax.random.choice(
-#                     key=key,
-#                     a=len(np.ravel(p)),
-#                     p=np.ravel(p),
-#                     shape=(),
-#                 )
-#                 key = jax.random.fold_in(key, 0)
-#                 position, AA = np.unravel_index(mut_idx, p.shape)
-#                 log_q_forward += log_p[position, AA]
-#                 mutations += [(position, AA)]
-#                 proposal = proposal.at[position].set(AA)
-#             # check if proposal is same as current sequence
-#             if np.all(proposal == sequence):
-#                 print(f"\t {i}: proposal is the same as current sequence, skipping.")
-#                 #_print_iter(iter, {"": aux_0, "time": time.time() - start_time}, v_0)
-#                 #continue
-#             else:
-#                 break
-#         muts = ", ".join([f"{pos}:{aa}" for (pos, aa) in mutations])
-#         print(f"Proposed mutations: {muts}")
+        for i in range(50):
+            proposal = sequence.copy()
+            mutations = []
+            log_q_forward = 0.0
+            path_length = jax.random.randint(
+                key=jax.random.key(np.random.randint(10000)),
+                minval=1,
+                maxval=max_path_length + 1,
+                shape=(),
+            )
+            key = jax.random.fold_in(key, 0)
+            for _ in range(path_length):
+                p, log_p = _proposal(proposal, g_0, proposal_temp, alphabet_size=alphabet_size)
+                mut_idx = jax.random.choice(
+                    key=key,
+                    a=len(np.ravel(p)),
+                    p=np.ravel(p),
+                    shape=(),
+                )
+                key = jax.random.fold_in(key, 0)
+                position, AA = np.unravel_index(mut_idx, p.shape)
+                log_q_forward += log_p[position, AA]
+                mutations += [(position, AA)]
+                proposal = proposal.at[position].set(AA)
+            # check if proposal is same as current sequence
+            if np.all(proposal == sequence):
+                print(f"\t {i}: proposal is the same as current sequence, skipping.")
+                #_print_iter(iter, {"": aux_0, "time": time.time() - start_time}, v_0)
+                #continue
+            else:
+                break
+        muts = ", ".join([f"{pos}:{aa}" for (pos, aa) in mutations])
+        print(f"Proposed mutations: {muts}")
         
-#         ### evaluate the proposal
-#         (v_1, aux_1), g_1 = _eval_loss_and_grad(
-#             loss, jax.nn.one_hot(proposal, alphabet_size), key=key_model if fix_loss_key else key, serial_evaluation=serial_evaluation
-#         )
+        ### evaluate the proposal
+        (v_1, aux_1), g_1 = _eval_loss_and_grad(
+            loss, jax.nn.one_hot(proposal, alphabet_size), key=key_model if fix_loss_key else key, serial_evaluation=serial_evaluation
+        )
 
-#         # next bit is to calculate the backward probability, which is only used
-#         # if detailed_balance is True
-#         prop_backward = proposal.copy()
-#         log_q_backward = 0.0
-#         for position, AA in reversed(mutations):
-#             p, log_p = _proposal(prop_backward, g_1, proposal_temp, alphabet_size=alphabet_size)
-#             log_q_backward += log_p[position, AA]
-#             prop_backward = prop_backward.at[position].set(AA)
+        # next bit is to calculate the backward probability, which is only used
+        # if detailed_balance is True
+        prop_backward = proposal.copy()
+        log_q_backward = 0.0
+        for position, AA in reversed(mutations):
+            p, log_p = _proposal(prop_backward, g_1, proposal_temp, alphabet_size=alphabet_size)
+            log_q_backward += log_p[position, AA]
+            prop_backward = prop_backward.at[position].set(AA)
 
-#         log_acceptance_probability = (v_0 - v_1) / temp + (
-#             (log_q_backward - log_q_forward) if detailed_balance else 0.0
-#         )
+        log_acceptance_probability = (v_0 - v_1) / temp + (
+            (log_q_backward - log_q_forward) if detailed_balance else 0.0
+        )
 
-#         log_acceptance_probability = min(0.0, log_acceptance_probability)
+        log_acceptance_probability = min(0.0, log_acceptance_probability)
 
-#         print(
-#             f"iter: {iter}, accept {np.exp(log_acceptance_probability): 0.3f} {v_0: 0.3f} {v_1: 0.3f} {log_q_forward: 0.3f} {log_q_backward: 0.3f}"
-#         )
+        print(
+            f"iter: {iter}, accept {np.exp(log_acceptance_probability): 0.3f} {v_0: 0.3f} {v_1: 0.3f} {log_q_forward: 0.3f} {log_q_backward: 0.3f}"
+        )
 
         
-#         print()
-#         if -jax.random.exponential(key=key) < log_acceptance_probability:
-#             sequence = proposal
-#             (v_0, aux_0), g_0 = (v_1, aux_1), g_1
+        print()
+        if -jax.random.exponential(key=key) < log_acceptance_probability:
+            sequence = proposal
+            (v_0, aux_0), g_0 = (v_1, aux_1), g_1
         
-#         _print_iter(iter, {"": aux_0, "time": time.time() - start_time}, v_0)
+        _print_iter(iter, {"": aux_0, "time": time.time() - start_time}, v_0)
         
 
-#         key = jax.random.fold_in(key, 0)
+        key = jax.random.fold_in(key, 0)
 
-#     return sequence
+    return sequence
