@@ -308,15 +308,19 @@ class MultiPhaseOptimization:
                 config=self.make_wandb_config()
             )
 
-        pssm_current = pssm_init
-        traj_loggers = []   
+        current_pssm = pssm_init
+        traj_loggers = []
+        all_final = np.zeros(shape=(len(self.phases), *pssm_init.shape))
+        all_best = np.zeros_like(all_final)
         for i, phase in enumerate(self.phases):
             print(f"Starting phase {phase.name} - ({i+1}/{len(self.phases)})")
-            pssm_current, _, logger  = phase.optimizer.run(
-                pssm_init=pssm_current, 
+            current_pssm, best_pssm, logger  = phase.optimizer.run(
+                pssm_init=current_pssm, 
                 key=key)
             
             traj_loggers.append(logger)
+            all_final[i] = current_pssm
+            all_best[i] = best_pssm
             key = jax.random.fold_in(key, i)
         
         full_logger = None
@@ -329,7 +333,8 @@ class MultiPhaseOptimization:
         if wandb.run is not None:
             wandb.finish()
 
-        return pssm_current, full_logger
+        all = {"final": all_final, "best": all_best}
+        return all["final"][-1], all, full_logger
 
     def make_wandb_config(self):
         config = {}
