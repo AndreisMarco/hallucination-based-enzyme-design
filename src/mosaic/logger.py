@@ -119,6 +119,32 @@ class TrajectoryLogger:
                     "Call clean_trajectory() on each first, or ensure trajectory_list is available."
                 )
         return merged
+    
+    def __getitem__(self, idx):
+        # Normalize int to slice to preserve the step dimension
+        if isinstance(idx, int):
+            idx = slice(idx, idx + 1)
+
+        sliced = TrajectoryLogger(is_leaf=self.is_leaf)
+        
+        if self.trajectory_list is not None:
+            sliced.trajectory_list = jax.tree.map(
+                lambda lst: lst[idx],
+                self.trajectory_list,
+                is_leaf=self.is_leaf,
+            )
+
+        if self.trajectory is not None:
+            def _slice(x):
+                if isinstance(x, np.ndarray):
+                    return x[idx]
+                return x
+            sliced.trajectory = jax.tree.map(_slice, self.trajectory)
+
+        if sliced.trajectory_list is None and sliced.trajectory is None:
+            raise RuntimeError("Logger has neither trajectory_list nor trajectory to slice.")
+        
+        return sliced
 
     def clean_trajectory(self, keep_trajectory_list=True):
         if self.trajectory_list is None:

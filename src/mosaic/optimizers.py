@@ -274,6 +274,7 @@ class LogitAPGM(PSSMOptimizer):
 class Phase:
     optimizer: PSSMOptimizer
     name: str
+    return_best: bool = False
 
 class MultiPhaseOptimization:
     def __init__(self, 
@@ -314,13 +315,22 @@ class MultiPhaseOptimization:
         all_best = np.zeros_like(all_final)
         for i, phase in enumerate(self.phases):
             print(f"Starting phase {phase.name} - ({i+1}/{len(self.phases)})")
-            current_pssm, best_pssm, logger  = phase.optimizer.run(
+            final_pssm, best_pssm, logger  = phase.optimizer.run(
                 pssm_init=current_pssm, 
                 key=key)
             
             traj_loggers.append(logger)
-            all_final[i] = current_pssm
+            all_final[i] = final_pssm
             all_best[i] = best_pssm
+            
+            if phase.return_best:
+                current_pssm = best_pssm
+                if self.log_trajectory:
+                    best_step = int(np.argmin(logger.trajectory_list["optim"]["loss"]))
+                    logger = logger[:best_step + 1]
+            else:
+                current_pssm = final_pssm
+
             key = jax.random.fold_in(key, i)
         
         full_logger = None
@@ -334,7 +344,8 @@ class MultiPhaseOptimization:
             wandb.finish()
 
         all = {"final": all_final, "best": all_best}
-        return all["final"][-1], all, full_logger
+        pssm = all_best[-1] if self.phases[-1].return_best else all_final[-1]
+        return pssm, all, full_logger
 
     def make_wandb_config(self):
         config = {}
