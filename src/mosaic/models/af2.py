@@ -607,4 +607,4 @@ class AlphaFoldLoss(LossTerm):
             "features": feature_dict
         }
 
-        return v, {f"{self.name}/{model_idx}": aux}
+        return v, {self.name: aux}
