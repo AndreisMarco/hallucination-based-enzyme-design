@@ -180,9 +180,12 @@ class PSSMOptimizer(ABC):
 
     def run(self, 
             pssm_init: Float[Array, "N 20"],
-            key,
             traj_logger: TrajectoryLogger | None = None,
+            key: Any | None = None,
             ):
+        
+        if key is None: 
+            key = jax.random.key(np.random.randint(10000))
         
         update_mask = self.update_mask if self.update_mask is not None \
                                        else jnp.ones(shape=(pssm_init.shape[0],), dtype=bool)
