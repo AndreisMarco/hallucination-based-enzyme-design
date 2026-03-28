@@ -206,7 +206,6 @@ class PSSMOptimizer(ABC):
             start_time = time.time()
 
             state, loss, aux = self.step(state, key)
-            aux = standardize_aux(aux)
             key = jax.random.fold_in(key, i)
 
             if self.update_loss_state:
@@ -216,6 +215,7 @@ class PSSMOptimizer(ABC):
                 best_loss = loss
                 best_pssm = state["x"]
 
+            aux = standardize_aux(aux)
             aux.update({"optim": {
                 "loss": loss,
                 "nnz": (state["x"] > 0.01).sum(-1).mean(),
