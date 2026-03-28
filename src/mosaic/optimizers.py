@@ -96,15 +96,17 @@ def update_states(aux, loss):
 # ============================================================================
 
 def _print_iter(i, aux):
-    """Print scalar metrics from aux to the terminal."""
     def is_scalar_float(x):
         return isinstance(x, (float, jax.Array, np.ndarray)) and jnp.ndim(x) == 0
-    metrics = {
-        jax.tree_util.keystr(k, simple=True, separator='.'): float(v)
-        for k, v in jax.tree_util.tree_leaves_with_path(aux)
-        if is_scalar_float(v)
-        and "state_index" not in jax.tree_util.keystr(k, simple=True, separator=".")
-    }
+    metrics = {}
+    for path, v in jax.tree_util.tree_leaves_with_path(aux):
+        if not is_scalar_float(v):
+            continue
+        parts = [str(p.key) for p in path if hasattr(p, "key")]
+        path_str = ".".join(parts) if parts else "value"
+        if "state_index" in path_str:
+            continue
+        metrics[path_str] = float(v)
     print(i, " | ".join(f"{k:<5}: {v:>10.2f}" for k, v in metrics.items()))
 
 def _is_model_aux(v):
