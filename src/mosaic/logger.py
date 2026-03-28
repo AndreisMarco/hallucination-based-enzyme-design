@@ -14,7 +14,8 @@ def plot_losses(loss: np.ndarray, additional_losses: dict[np.ndarray] | None = N
     ax.plot(steps, loss, color="black", linewidth=2.0, label="Total Loss")
     if additional_losses is not None:
         for name, values in additional_losses.items():
-            values = np.mean(values, axis=-1)
+            if values.ndim == 2: 
+                values = np.mean(values, axis=-1)
             if values.mean() < 0:
                 values = -values
                 name = f"(neg) {name}"
@@ -69,32 +70,28 @@ class TrajectoryLogger:
         self.trajectory_list = None
         self.trajectory = None
         self.is_leaf = is_leaf if is_leaf is not None else _default_is_leaf
-
-    def _to_cpu(self, x):
-        if isinstance(x, (jax.Array, jnp.ndarray)):
-            return np.array(x)
-        return x
-
-    @classmethod
-    def load(cls, path: str):
-        import pickle
-        logger = cls()
-        with open(path, "rb") as f:
-            logger.trajectory = pickle.load(f)
-        return logger
-
+    
     def update(self, aux):
+        to_cpu = lambda x: np.array(x) if isinstance(x, (jax.Array, jnp.ndarray)) else x
+
         # Initialize
         if self.trajectory_list is None:
-            self.trajectory_list = jax.tree.map(lambda x: [self._to_cpu(x)], aux)
+            self.trajectory_list = jax.tree.map(lambda x: [to_cpu(x)], aux)
         # Update
         else:
             self.trajectory_list = jax.tree.map(
-                lambda traj, new_value: traj + [self._to_cpu(new_value)],
+                lambda traj, new_value: traj + [to_cpu(new_value)],
                 self.trajectory_list,
                 aux,
                 is_leaf=self.is_leaf,
             )
+
+    def __len__(self):
+        if self.trajectory_list is not None:
+            return len(self.trajectory_list["optim"]["pssm"])
+        elif self.trajectory is not None:
+            return len(self.trajectory["optim"]["pssm"])
+        return len(self.traj)
 
     def __add__(self, other):
         merged = TrajectoryLogger(is_leaf=self.is_leaf)
@@ -121,12 +118,7 @@ class TrajectoryLogger:
         return merged
     
     def __getitem__(self, idx):
-        # Normalize int to slice to preserve the step dimension
-        if isinstance(idx, int):
-            idx = slice(idx, idx + 1)
-
-        sliced = TrajectoryLogger(is_leaf=self.is_leaf)
-        
+        sliced = TrajectoryLogger(is_leaf=self.is_leaf)        
         if self.trajectory_list is not None:
             sliced.trajectory_list = jax.tree.map(
                 lambda lst: lst[idx],
@@ -159,31 +151,32 @@ class TrajectoryLogger:
             except (ValueError, TypeError):
                 return lst
         stacked = jax.tree_util.tree_map(_stack, self.trajectory_list, is_leaf=self.is_leaf)
+        self.trajectory = stacked
 
-        # Extract and save the model separately
-        model_keys = [k for k in stacked.keys() if k != "optim"]
-        if len(model_keys) != 1:
-            raise ValueError(
-                f"Expected exactly one model key besides 'optim', found: {model_keys}"
-            )
-        model_name = model_keys[0]
-        model_dict = stacked[model_name]
-
-        # merge single valued dictionary of losses into a single dictionary
-        losses_list = model_dict.get("losses", [])
-        losses = {k: v for d in losses_list for k, v in d.items()}
-
-        self.trajectory = {
-            "model":    model_name,
-            "losses":   losses,
-            "features": model_dict.get("features", {}),
-            "optim":    stacked["optim"],
-        }
         # Optionally clean memory
         if not keep_trajectory_list:
             self.trajectory_list = None
 
         return self.trajectory
+    
+    def to_flat_dict(self, sep: str = "."):
+        if self.trajectory is None:
+            self.clean_trajectory()
+
+        flat = {}
+        for path, leaf in jax.tree_util.tree_leaves_with_path(self.trajectory):
+            parts = [str(p.key) for p in path if hasattr(p, "key")]
+            path_str = sep.join(parts) if parts else "value"
+            flat[path_str] = leaf
+        return flat
+    
+    @classmethod
+    def load(cls, path: str):
+        import pickle
+        logger = cls()
+        with open(path, "rb") as f:
+            logger.trajectory = pickle.load(f)
+        return logger
 
     def save(self, log_path: Path, save_loss_plot: bool = True, save_pssm_video: bool = True):
         import pickle
@@ -207,9 +200,11 @@ class TrajectoryLogger:
 
         # Save plot of losses
         if save_loss_plot:
+            flat = self.to_flat_dict()
+            losses_dict = {k: v for k,v in flat.items() if "losses" in k}
             fig = plot_losses(
                 loss=self.trajectory["optim"]["loss"],
-                additional_losses=self.trajectory["losses"],
+                additional_losses=losses_dict,
             )
             fig.savefig(log_path / "losses.png")
             plt.close(fig)
