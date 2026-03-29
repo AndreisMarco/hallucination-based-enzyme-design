@@ -49,7 +49,7 @@ class FixedStructureInverseFoldingLL(LossTerm):
     sequence_boltz: Float[Array, "N 20"]
     mpnn: ProteinMPNN
     encoded_state: tuple
-    name: str
+    name: str = "mppn_inverse_folding_ll"
     stop_grad: bool = False
 
     def __call__(
@@ -84,12 +84,13 @@ class FixedStructureInverseFoldingLL(LossTerm):
 
         ll = (logits * sequence_mpnn).sum(-1)[:binder_length].mean()
 
-        return -ll, {f"{self.name}_ll": ll}
+        return -ll, {self.name: ll}
 
     @staticmethod
     def from_structure(
         st: gemmi.Structure,
         mpnn: ProteinMPNN,
+        name: str | None = None,
         stop_grad: bool = False,
     ):
         st = st.clone()
@@ -131,7 +132,7 @@ class FixedStructureInverseFoldingLL(LossTerm):
             ),
             mpnn=mpnn,
             encoded_state=(h_V, h_E, E_idx),
-            name=st.name,
+            name=name if name is not None else st.name,
             stop_grad=stop_grad,
         )
 
