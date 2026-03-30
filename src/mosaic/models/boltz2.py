@@ -148,8 +148,9 @@ class Boltz2(StructurePredictionModel):
             *, 
             loss, 
             features, 
-            recycling_steps=1, 
+            recycling_steps=1,
             sampling_steps=None,
+            name: str = "boltz2",
             features_to_log: list[str] | None = None
             ):
         
@@ -163,6 +164,7 @@ class Boltz2(StructurePredictionModel):
             features=features,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps if sampling_steps is not None else 25,
+            name=name,
             loss=loss,
             deterministic=True,
             features_to_log=features_to_log
@@ -176,6 +178,7 @@ class Boltz2(StructurePredictionModel):
             recycling_steps=1, 
             num_samples: int = 4, 
             sampling_steps=None, 
+            name: str = "boltz2", 
             reduction=jnp.mean, 
             features_to_log: list[str] | None = None
             ):
@@ -190,6 +193,7 @@ class Boltz2(StructurePredictionModel):
             features=features,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps if sampling_steps is not None else 25,
+            name=name,
             loss=loss,
             deterministic=True,
             num_samples=num_samples,
