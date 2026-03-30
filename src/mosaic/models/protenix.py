@@ -79,7 +79,6 @@ class Protenix(StructurePredictionModel):
         features_to_log: list[str] | None = None
     ):
         return self.build_multisample_loss(
-            name=self.name,
             loss=loss,
             features=features,
             recycling_steps=recycling_steps,
