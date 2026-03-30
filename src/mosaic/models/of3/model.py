@@ -45,7 +45,7 @@ from jopenfold3._vendor.openfold3.projects.of3_all_atom.config.inference_query_f
 )
 from jopenfold3.batch import Batch
 from jopenfold3.model import OpenFold3
-from jopenfold3.mosaic.losses import (
+from mosaic.models.of3.losses import (
     MultiSampleOF3Loss,
     OF3FromTrunkOutput,
     set_binder_sequence,
