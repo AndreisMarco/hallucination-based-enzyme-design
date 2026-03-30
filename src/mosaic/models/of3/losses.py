@@ -276,8 +276,10 @@ class MultiSampleOF3Loss(LossTerm):
     num_cycles: int = 4
     sampling_steps: int = 20
     num_samples: int = 4
+    name: str = "OF3Multi"
     reduction: any = jnp.mean
     atom_lookup: any = None
+    features_to_log: list[str] | None = None
 
     def __call__(self, sequence: Float[Array, "N 20"], key):
         batch = set_binder_sequence(sequence, self.batch)
@@ -298,5 +300,11 @@ class MultiSampleOF3Loss(LossTerm):
             return self.loss(sequence=sequence, output=output, key=key)
 
         vs, auxs = jax.vmap(single_sample)(jax.random.split(key, self.num_samples))
-        sortperm = jnp.argsort(vs)
-        return self.reduction(vs), jax.tree.map(lambda v: list(v[sortperm]), auxs)
+        
+        auxs = {
+            "losses": auxs,
+            "features": {}
+        } 
+
+        return self.reduction(vs), {self.name: auxs}
+
