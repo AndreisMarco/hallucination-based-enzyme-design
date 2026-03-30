@@ -146,7 +146,7 @@ class Boltz2(StructurePredictionModel):
             features, 
             recycling_steps=1, 
             sampling_steps=None,
-            features_to_log=None
+            features_to_log: list[str] | None = None
             ):
         
         if features_to_log is not None:
@@ -173,7 +173,7 @@ class Boltz2(StructurePredictionModel):
             num_samples: int = 4, 
             sampling_steps=None, 
             reduction=jnp.mean, 
-            features_to_log=None
+            features_to_log: list[str] | None = None
             ):
         
         if features_to_log is not None:

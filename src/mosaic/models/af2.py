@@ -432,7 +432,7 @@ class AlphaFold2(StructurePredictionModel):
         name="af2", 
         use_dropout=False, 
         initial_state=None,
-        features_to_log=None
+        features_to_log: list[str] | None = None
         ):
         assert sampling_steps is None, "AF2 does not support sampling steps"
 
