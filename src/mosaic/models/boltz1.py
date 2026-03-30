@@ -81,7 +81,8 @@ sequences:"""
                    loss, 
                    features, 
                    recycling_steps=1, 
-                   sampling_steps=None, 
+                   sampling_steps=None,
+                   name: str = "boltz1", 
                    features_to_log: list[str] | None = None
                    ):
         
@@ -95,6 +96,7 @@ sequences:"""
             features=features,
             recycling_steps=recycling_steps
             - 1,  # Really awkward off-by-one issue in Joltz1 :/
+            name=name,
             sampling_steps=sampling_steps if sampling_steps is not None else 25,
             loss=loss,
             deterministic=True,
