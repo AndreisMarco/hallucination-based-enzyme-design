@@ -70,15 +70,16 @@ class Protenix(StructurePredictionModel):
         features,
         recycling_steps=1,
         sampling_steps=None,
+        name: str | None = None,
         initial_recycling_state=None,
         features_to_log: list[str] | None = None
     ):
         return self.build_multisample_loss(
-            name=self.name,
             loss=loss,
             features=features,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
+            name=name if name is not None else self.name,
             num_samples=1,
             initial_recycling_state=initial_recycling_state,
             features_to_log=features_to_log
@@ -92,6 +93,7 @@ class Protenix(StructurePredictionModel):
         recycling_steps=1,
         num_samples: int = 4,
         sampling_steps=None,
+        name: str | None = None,
         reduction=jnp.mean,
         initial_recycling_state=None,
         features_to_log: list[str] | None = None
@@ -104,12 +106,12 @@ class Protenix(StructurePredictionModel):
         if sampling_steps is None:
             sampling_steps = self.default_sample_steps
         return MultiSampleProtenixLoss(
-            name=self.name,
             model=self.protenix,
             features=features,
             loss=loss,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
+            name=name if name is not None else self.name,
             num_samples=num_samples,
             reduction=reduction,
             initial_recycling_state=initial_recycling_state,
