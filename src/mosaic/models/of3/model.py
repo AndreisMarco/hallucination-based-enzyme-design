@@ -561,6 +561,7 @@ class OF3(StructurePredictionModel):
         features: Batch,
         recycling_steps: int = 3,
         sampling_steps: int | None = None,
+        features_to_log: list[str] | None = None,
     ) -> LossTerm:
         return self.build_multisample_loss(
             loss=loss,
@@ -568,6 +569,7 @@ class OF3(StructurePredictionModel):
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
             num_samples=1,
+            features_to_log=features_to_log
         )
 
     def build_multisample_loss(
@@ -579,7 +581,18 @@ class OF3(StructurePredictionModel):
         sampling_steps: int | None = None,
         num_samples: int = 4,
         reduction=jnp.mean,
+        features_to_log: list[str] | None = None,
     ) -> MultiSampleOF3Loss:
+
+        if features_to_log is not None:
+            # TODO: how are features handled in of3, how to log them as in other models?
+            raise NotImplementedError(
+                "feature logging is not currently supported for openfold3"
+            )
+            not_found = [f for f in features_to_log if f not in features.keys()]
+            if len(not_found) != 0: 
+                print(f"The following losses are not registered in the current model: {not_found}")
+
         if sampling_steps is None:
             sampling_steps = self.default_sampling_steps
         return MultiSampleOF3Loss(
@@ -590,6 +603,7 @@ class OF3(StructurePredictionModel):
             sampling_steps=sampling_steps,
             num_samples=num_samples,
             reduction=reduction,
+            features_to_log=features_to_log,
         )
 
 
