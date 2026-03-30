@@ -1,11 +1,11 @@
 import marimo
 
-__generated_with = "0.19.9"
+__generated_with = "0.20.4"
 app = marimo.App()
 
 with app.setup:
     import marimo as mo
-    from mosaic.optimizers import simplex_APGM
+    from mosaic.optimizers import SimplexAPGM, MultiPhaseOptimization, Phase
     import mosaic.losses.structure_prediction as sp
     import matplotlib.pyplot as plt
     import jax
@@ -23,7 +23,7 @@ with app.setup:
     import jax.numpy as jnp
     from protenix.protenij import TrunkEmbedding
     from mosaic.structure_prediction import TargetChain
-    from mosaic.models.protenix import ProtenixMini, Protenix2025, ProtenixBase
+    from mosaic.models.protenix import ProtenixMini, Protenix2025, ProtenixBase, ProtenixTiny
 
 
 @app.cell(hide_code=True)
@@ -61,7 +61,7 @@ def _(binder_length, protenix, target_sequence, target_structure):
         chains=[
             TargetChain(
                 target_sequence,
-                use_msa=True,
+                use_msa=False,
                 template_chain=target_structure[0][0],
             )
         ],
@@ -129,7 +129,7 @@ def _():
 
 @app.cell
 def _(binder_length, loss):
-    PSSM = jax.nn.softmax(
+    pssm_init = jax.nn.softmax(
         0.5
         * jax.random.gumbel(
             key=jax.random.key(np.random.randint(1000000)),
@@ -137,32 +137,41 @@ def _(binder_length, loss):
         )
     )
 
-    _, PSSM = simplex_APGM(
-        loss_function=loss,
-        x=PSSM,
-        n_steps=100,
-        stepsize=0.15 * np.sqrt(binder_length),
-        momentum=0.3,
-        scale=1.0,
-        update_loss_state=False,
-        max_gradient_norm=1.0,
+    optimizer = MultiPhaseOptimization(
+        phases=[
+            Phase(
+                name="soft",
+                return_best=True,
+                optimizer=SimplexAPGM(
+                    loss_fn=loss,
+                    n_steps = 100,
+                    stepsize=0.15 * np.sqrt(binder_length),
+                    momentum=0.3,
+                    scale=1.0,
+                    update_loss_state=False,
+                    max_gradient_norm=1.0
+                )
+            ),
+            Phase(
+                name="sharp",
+                optimizer=SimplexAPGM(
+                    loss_fn=loss,
+                    n_steps=20,
+                    stepsize=0.5 * np.sqrt(binder_length),
+                    momentum=0.0,
+                    scale=1.3,
+                    update_loss_state=False,
+                    max_gradient_norm=1.0
+                )
+            )
+        ]
     )
-    return (PSSM,)
+    return optimizer, pssm_init
 
 
 @app.cell
-def _(PSSM, binder_length, loss):
-    PSSM_sharper, _ = simplex_APGM(
-        loss_function=loss,
-        x=jnp.log(PSSM + 1e-5),
-        n_steps=20,
-        stepsize=0.5 * np.sqrt(binder_length),
-        momentum=0.0,
-        scale=1.3,
-        update_loss_state=False,
-        logspace=False,
-        max_gradient_norm=1.0,
-    )
+def _(optimizer, pssm_init):
+    PSSM_sharper, _, _ = optimizer.run(pssm_init) 
     return (PSSM_sharper,)
 
 

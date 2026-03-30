@@ -1,11 +1,11 @@
 import marimo
 
-__generated_with = "0.19.8"
+__generated_with = "0.20.4"
 app = marimo.App(width="medium")
 
 with app.setup:
     import marimo as mo
-    from mosaic.optimizers import simplex_APGM
+    from mosaic.optimizers import MultiPhaseOptimization, Phase, SimplexAPGM, LogitAPGM
     import mosaic.losses.structure_prediction as sp
     import matplotlib.pyplot as plt
     import jax
@@ -43,19 +43,18 @@ def _():
     return
 
 
-@app.cell
-def _():
-    # we'll use a sequence + MSA for the VHH. We could also add a template
-    masked_framework_sequence = "QVQLVESGGGLVQPGGSLRLSCAASXXXXXXXXXXXLGWFRQAPGQGLEAVAAXXXXXXXXYYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCXXXXXXXXXXXXXXXXXXWGQGTLVTVS"
-    return (masked_framework_sequence,)
-
-
 @app.cell(hide_code=True)
 def _():
     mo.md("""
-    We'll use PDL1 as a target; the world will never have enough de novo binders to PDL1. We'll use both an MSA and a template for the target structure.
+    We want to use Protenix2025 to design a vhh against PDL1; the world will never have enough de novo binders to PDL1.
     """)
     return
+
+
+@app.cell
+def _():
+    protenix = Protenix2025()
+    return (protenix,)
 
 
 @app.cell
@@ -73,30 +72,56 @@ def _(target_structure):
     return
 
 
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    Given that we are working with a VHH, the optimization is only done for the CDRs (which determines the binding)
+    """)
+    return
+
+
 @app.cell
 def _():
-    # for fun we'll incorporate ESMC and AbLang PLLs into our loss function. In theory this should make our sequences more "natural."
+    masked_framework_sequence = "QVQLVESGGGLVQPGGSLRLSCAASXXXXXXXXXXXLGWFRQAPGQGLEAVAAXXXXXXXXYYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCXXXXXXXXXXXXXXXXXXWGQGTLVTVS"
+    return (masked_framework_sequence,)
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    Mosaic supports ESMC (a large protein model focused on biologically meaningful representation) and AbLang (a large protein model specifically trained on Ab sequences).
+
+    Even though not strictly necessary, including the PLLs of both models in our loss function, we guide the optimization towards more plausible and more antibody-like sequences.
+    """)
+    return
+
+
+@app.cell
+def _():
     ablang, ablang_tokenizer = load_ablang("heavy")
     ablang_pll = AbLangPseudoLikelihood(
         model=ablang,
         tokenizer=ablang_tokenizer,
         stop_grad=True,
     )
-    # and ESMC PLL
-    ESMCPLL = ESMCPseudoLikelihood(load_esmc("esmc_300m"), stop_grad=True)
-    return ESMCPLL, ablang_pll
+
+    ESMC_pll = ESMCPseudoLikelihood(load_esmc("esmc_300m"), stop_grad=True)
+    return ESMC_pll, ablang_pll
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _():
-    protenix = Protenix2025()
-    return (protenix,)
+    mo.md(r"""
+    As of now, if binder_features is used to initialize features,  the sidechains of the binder will not be predicted.
+
+    Instead, we'll use target_only_features so we properly handle sidechains on the framework. this shouldn't make a huge difference but feels right.
+    """)
+    return
 
 
 @app.cell
 def _(masked_framework_sequence, protenix, target_sequence, target_structure):
     design_features, design_structure = protenix.target_only_features(
-        # instead of binder_features, we'll use target_only_features so we properly handle sidechains on the framework. this shouldn't make a huge difference but feels right.
         chains=[
             TargetChain(
                 masked_framework_sequence,
@@ -112,35 +137,38 @@ def _(masked_framework_sequence, protenix, target_sequence, target_structure):
     return design_features, design_structure
 
 
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    Now let's build up the loss function which will contain as main loss, the BinderTargetContact.
+
+    If we really don't like "sidebinders" and want contact ONLY with the CDRs we could add a **negative** BinderTargetContact term here that only applies to framework residues.
+
+    I set this to zero because it seems silly to me: plenty of natural VHHs have framework-target contacts to really discourage these kinds of poses you'd also need to downweight some of the terms below that prefer secondary structure within the binder (WithinBinderPAE, pLDDT, etc)
+    """)
+    return
+
+
 @app.cell
-def _(
-    ESMCPLL,
-    ablang_pll,
-    design_features,
-    masked_framework_sequence,
-    protenix,
-):
-    # Now let's build up the loss function
+def _(design_features, masked_framework_sequence, protenix):
     structure_loss = (
+        # encourage binding with the CDRs
         sp.BinderTargetContact(
             paratope_idx=np.array(
                 [
                     i for (i, c) in enumerate(masked_framework_sequence) if c == "X"
-                ]  # encourage binding with the CDRs rather than the framework.
+                ]  
             )
             # if you have a particular hotspot you're going for you could use `epitope_idx` here.
         )
-        - 0.0
-        * sp.BinderTargetContact(
+        # discourage binding with the framework
+        - 0.0 * sp.BinderTargetContact(
             paratope_idx=np.array(
                 [
                     i for (i, c) in enumerate(masked_framework_sequence) if c != "X"
-                ]  # discourage binding with the framewor
+                ]  
             )
         )
-        # if we really don't like "sidebinders" and want contact ONLY with the CDRs we could add a *negative* BinderTargetContact term here that only applies to framework residues
-        # I set this to zero because it seems silly to me: plenty of natural VHHs have framework-target contacts
-        # to really discourage these kinds of poses you'd also need to downweight some of the terms below that prefer secondary structure within the binder (WithinBinderPAE, pLDDT, etc)
         + 0.05 * sp.TargetBinderPAE()
         + 0.05 * sp.BinderTargetPAE()
         + 0.025 * sp.IPTMLoss()
@@ -155,75 +183,98 @@ def _(
         recycling_steps=2,
         sampling_steps=20,
     )
-
-    # we use SetPositions to fix the framework AAs
-    loss = SetPositions.from_sequence(
-        wildtype=masked_framework_sequence,
-        loss=0.1 * ESMCPLL + 2 * model_loss + 0.1 * ablang_pll,
-    )
-    return (loss,)
+    return (model_loss,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _():
-    mo.callout(
-        "JIT will take a very long time the first time we run the following cell. Rerun for more samples!"
-    )
+    mo.md(r"""
+    As for now the loss would be computed on the entire sequence (including the framework regions)... Mosaic provides a `SetPositions` wrapper for losses, that can be built from a sequence and only computes gradients with respect to positions initialized with the unknown amino acid `X`.
+    """)
     return
 
 
 @app.cell
-def _(TOKENS, loss, masked_framework_sequence):
-    # Now let's design
-
-    num_designed_residues = len([c for c in masked_framework_sequence if c == "X"])
-
-    _pssm = 0.5 * jax.random.gumbel(
-        key=jax.random.key(np.random.randint(1000000)),
-        shape=(num_designed_residues, 20),
+def _(ESMC_pll, ablang_pll, masked_framework_sequence, model_loss):
+    loss = SetPositions.from_sequence(
+        wildtype=masked_framework_sequence,
+        loss=0.1 * ESMC_pll + 2 * model_loss + 0.1 * ablang_pll,
     )
+    return (loss,)
 
-    _, partial_pssm = simplex_APGM(
-        loss_function=loss,
-        x=_pssm,
-        n_steps=50,
-        stepsize=1.5 * np.sqrt(_pssm.shape[0]),
-        momentum=0.2,
-        scale=1.00,
-        serial_evaluation=False,
-        logspace=True,
-        max_gradient_norm=1.0,
-    )
-    _, partial_pssm = simplex_APGM(
-        loss_function=loss,
-        x=partial_pssm,
-        n_steps=30,
-        stepsize=0.5 * np.sqrt(_pssm.shape[0]),
-        momentum=0.0,
-        scale=1.1,
-        serial_evaluation=False,
-        logspace=False,
-        max_gradient_norm=1.0,
-    )
-    print("".join(TOKENS[i] for i in partial_pssm.argmax(-1)))
 
-    _, partial_pssm = simplex_APGM(
-        loss_function=loss,
-        x=jnp.log(partial_pssm + 1e-5),
-        n_steps=30,
-        stepsize=0.25 * np.sqrt(_pssm.shape[0]),
-        momentum=0.0,
-        scale=1.1,
-        serial_evaluation=False,
-        logspace=True,
-        max_gradient_norm=1.0,
-    )
-    return (partial_pssm,)
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    Now let's define and run a multiphase optimizer on the CDRs.
+
+    JIT will take a very long time the first time we run the following cell. Rerun for more samples!
+    """)
+    return
 
 
 @app.cell
+def _(masked_framework_sequence):
+    num_designed_residues = len([c for c in masked_framework_sequence if c == "X"])
+    pssm_init = 0.5 * jax.random.gumbel(
+        key=jax.random.key(np.random.randint(1000000)),
+        shape=(num_designed_residues, 20),
+    )
+    return (pssm_init,)
+
+
+@app.cell
+def _(TOKENS, loss, pssm_init):
+    optimizer = MultiPhaseOptimization(
+        phases=[
+            Phase(name="soft_logit",
+                  return_best=True,
+                  optimizer=LogitAPGM(
+                      loss_fn=loss,
+                      # n_steps=50,
+                      n_steps=5,
+                      stepsize=1.5 * np.sqrt(pssm_init.shape[0]),
+                      momentum=0.2,
+                      scale=1.0,
+                      max_gradient_norm=1.0
+                  )
+                 ),
+            Phase(name="sharp_simplex",
+                  return_best=True,
+                  optimizer=SimplexAPGM(
+                      loss_fn=loss,
+                      # n_steps=30,
+                      n_steps=3,
+                      stepsize=0.5 * np.sqrt(pssm_init.shape[0]),
+                      momentum=0.0,
+                      scale=1.1,
+                      max_gradient_norm=1.0
+                  )
+                 ),
+            Phase(name="sharp_logit",
+                  return_best=True,
+                  optimizer=LogitAPGM(
+                      loss_fn=loss,
+                      # n_steps=30,
+                      n_steps=3,
+                      stepsize=0.25 * np.sqrt(pssm_init.shape[0]),
+                      momentum=0.0,
+                      scale=1.1,
+                      max_gradient_norm=1.0
+                  )
+                 )
+        ])
+
+    partial_pssm, _, _ = optimizer.run(pssm_init) 
+    print("".join(TOKENS[i] for i in partial_pssm.argmax(-1)))
+    return (partial_pssm,)
+
+
+@app.cell(hide_code=True)
 def _():
-    mo.callout("Let's try to improve our design using MCMC")
+    mo.md(r"""
+    Let's try to improve our design using MCMC
+    """)
     return
 
 
@@ -239,7 +290,8 @@ def _(gradient_MCMC, loss, partial_pssm):
     s_mcmc = gradient_MCMC(
         loss=loss,
         sequence=jax.device_put(partial_pssm.argmax(-1)),
-        steps=30,
+        # steps=30,
+        steps=3,
         fix_loss_key=False,
         proposal_temp=1e-5,
         max_path_length=1,
@@ -247,12 +299,13 @@ def _(gradient_MCMC, loss, partial_pssm):
     return (s_mcmc,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _():
-    mo.callout(
-        "It's very important we add the framework residues back into our sequence before e.g. repredicting!",
-        kind="danger",
-    )
+    mo.md(r"""
+    We have been optimizing only the pssm of the CDRs. It's very important we add the framework residues back into our sequence before e.g. repredicting!
+
+    This can be done using the `loss.sequence()` function of our `SetPositions` wrapped loss.
+    """)
     return
 
 
@@ -262,9 +315,16 @@ def _(loss, s_mcmc):
     return (final_pssm,)
 
 
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    Lastly, repredict the full vhh with optimized CDRs in complex with the target.
+    """)
+    return
+
+
 @app.cell
 def _(TOKENS, design_features, design_structure, final_pssm, protenix):
-    # repredict with more recycling steps
     prediction_inpaint = protenix.predict(
         PSSM=final_pssm,
         writer=design_structure,
@@ -274,7 +334,16 @@ def _(TOKENS, design_features, design_structure, final_pssm, protenix):
     )
 
     design_str = "".join(TOKENS[i] for i in final_pssm.argmax(-1))
-    return design_str, prediction_inpaint
+    print(f"Final sequence: {design_str}")
+    return (prediction_inpaint,)
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    Visualize some prediction infos and save the predicted structure
+    """)
+    return
 
 
 @app.cell
@@ -303,12 +372,6 @@ def _(masked_framework_sequence, prediction_inpaint):
 @app.cell
 def _(prediction_inpaint):
     pdb_viewer(prediction_inpaint.st)
-    return
-
-
-@app.cell
-def _(design_str):
-    design_str
     return
 
 
