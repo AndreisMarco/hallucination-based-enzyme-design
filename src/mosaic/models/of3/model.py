@@ -561,6 +561,7 @@ class OF3(StructurePredictionModel):
         features: Batch,
         recycling_steps: int = 3,
         sampling_steps: int | None = None,
+        name: str = "of3",
         features_to_log: list[str] | None = None,
     ) -> LossTerm:
         return self.build_multisample_loss(
@@ -568,6 +569,7 @@ class OF3(StructurePredictionModel):
             features=features,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
+            name=name,
             num_samples=1,
             features_to_log=features_to_log
         )
@@ -579,6 +581,7 @@ class OF3(StructurePredictionModel):
         features: Batch,
         recycling_steps: int = 3,
         sampling_steps: int | None = None,
+        name: str = "of3",
         num_samples: int = 4,
         reduction=jnp.mean,
         features_to_log: list[str] | None = None,
@@ -601,6 +604,7 @@ class OF3(StructurePredictionModel):
             loss=loss,
             num_cycles=recycling_steps + 1,
             sampling_steps=sampling_steps,
+            name=name,
             num_samples=num_samples,
             reduction=reduction,
             features_to_log=features_to_log,
