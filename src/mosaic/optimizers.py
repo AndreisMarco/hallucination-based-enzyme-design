@@ -484,12 +484,14 @@ class MultiPhaseOptimization:
         if self.log_trajectory:
             for phase in self.phases:
                 if phase.optimizer.log_trajectory is False:
-                    raise RuntimeError(f"If log_trajectory=True all optimizers must have log_trajectory=True, got {phase.optimizer.log_trajectory} for phase'{phase.name}'")
+                    phase.optimizer.log_trajectory = True
+                    print(f"[MultiPhaseOptimization] Setting log_trajectory=True for phase '{phase.name}'")
                 
         if self.wandb_project is not None:
             for phase in self.phases:
                 if phase.optimizer.wandb_project != self.wandb_project:
-                    raise RuntimeError(f"If using wandb, all optimizers must share the same wandb_project, got {phase.optimizer.wandb_project} for phase '{phase.name}'")
+                    phase.optimizer.wandb_project = self.wandb_project
+                    print(f"[MultiPhaseOptimization] Setting wandb_project='{self.wandb_project}' for phase '{phase.name}'")
 
     def run(self,
             pssm_init: Float[Array, "N 20"], 
