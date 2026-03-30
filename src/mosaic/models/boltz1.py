@@ -82,7 +82,8 @@ sequences:"""
                    features, 
                    recycling_steps=1, 
                    sampling_steps=None, 
-                   features_to_log=None):
+                   features_to_log: list[str] | None = None
+                   ):
         
         if features_to_log is not None:
             not_found = [f for f in features_to_log if f not in features.keys()]

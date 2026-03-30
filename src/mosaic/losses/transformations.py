@@ -50,7 +50,8 @@ class SoftClip(LossTerm):
     def __call__(self, *args, key, **kwargs):
         v, aux = self.loss(*args, key=key, **kwargs)
         z = jax.nn.elu((v - self.l)*self.alpha)
-        return z, {"": aux, self.name: z}
+        loss_name = next(iter(aux))
+        return z, {**aux, f"{loss_name}_{self.name}": z}
 
 
 
@@ -73,7 +74,9 @@ class ClippedLoss(LossTerm):
 
     def __call__(self, *args, key, **kwargs):
         v, aux = self.loss(*args, key=key, **kwargs)
-        return v.clip(self.l, self.u), {"": aux, self.name: v.clip(self.l, self.u)}
+        clipped = v.clip(self.l, self.u)
+        loss_name = next(iter(aux))
+        return clipped, {**aux, f"{loss_name}_{self.name}": clipped}
 
 
 # Generic tools for fixing positions in a binder sequence

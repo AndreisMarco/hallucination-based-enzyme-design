@@ -22,6 +22,7 @@ There has been a recent explosion in the application of machine learning to prot
 | Boltz-2 |
 | BoltzGen (design) |
 | AlphaFold2 |
+| OpenFold3 |
 | [Protenix (miny, tiny, base, v1.0, 20250630_v1.0.0)](#protenix) |
 | [ProteinMPNN (standard, soluble, AbMPNN)](#proteinmpnn) |
 | [ESM (2 *or* C)](#esm) |
@@ -34,7 +35,7 @@ There has been a recent explosion in the application of machine learning to prot
 ### Installation
 We recommend using `uv`, e.g. run `uv sync --group jax-cuda` after cloning the repo to install dependencies.
 
-To run the example notebook try `source .venv/bin/activate`, `marimo edit examples/example_notebook.py`.
+To run the example notebook try `uv run marimo edit examples/example_notebook.py`.
 
 > You may need to add various `uv` overrides for specific packages and your machine, take a look at [pyproject.toml](pyproject.toml)
 
@@ -174,7 +175,7 @@ Take a look at [optimizers.py](src/mosaic/optimizers.py) for a few examples of d
 #### Structure Prediction
 ---
 
-We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to five structure prediction models: `Boltz1`, `Boltz2`, `AF2`, `ProtenixMini,` `ProtenixTiny,` `ProtenixBase,` and `Protenix2025.`
+We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to six structure prediction models: `OpenFold3`,`Boltz1`, `Boltz2`, `AF2`, `ProtenixMini,` `ProtenixTiny,` `ProtenixBase,` and `Protenix2025.`
 
 
 To make a prediction or design a binder, you'll need to make a list of `mosaic.structure_prediction.TargetChain` objects. This is a simple dataclass that contains a protein (or DNA or RNA) sequence, a flag to tell the model if it should use MSAs (`use_msa`), and potentially a template structure (as a `gemmi.Chain`).
@@ -220,7 +221,7 @@ Continuing the example above, we can construct a loss and do design as follows:
 
 ```python
 import mosaic.losses.structure_prediction as sp
-from mosaic.optimizers import simplex_APGM
+from mosaic.optimizers import SimplexAPGM
 import numpy as np
 
 binder_length = 80
@@ -233,7 +234,7 @@ loss = model.build_loss(
     loss=sp.BinderTargetContact() + sp.WithinBinderContact(), features=design_features, recycling_steps=2
 )
 
-PSSM = jax.nn.softmax(
+pssm_init = jax.nn.softmax(
     0.5
     * jax.random.gumbel(
         key=jax.random.key(np.random.randint(100000)),
@@ -241,12 +242,15 @@ PSSM = jax.nn.softmax(
     )
 )
 
-_, PSSM = simplex_APGM(
-    loss_function=loss,
-    x=PSSM,
+optimizer = SimplexAPGM(
+    loss_fn=loss,
     n_steps=50,
     stepsize=0.15,
     momentum=0.3,
+)
+
+pssm_final, pssm_best, _ = optimizer.run(
+    pssm_init=pssm_init
 )
 ```
 
@@ -378,11 +382,56 @@ trigram_ll = TrigramLL.from_pkl()
 We include some standard [optimizers](src/mosaic/optimizers.py).
 
 
-First, `simplex_APGM,` which is an accelerated proximal gradient algorithm on the probability simplex. One critical hyperparameter is the stepsize, a reasonable first guess is `0.1*np.sqrt(binder_length)`. Another useful keyword argument is `scale`, which corresponds to $\ell_2$ regularization. Values larger than `1.0` encourage sparse solutions; a typical binder design run might start with `scale=1.0` to get an initial, soft solution and then ramp up to something higher to get a discrete solution. 
+First, `SimplexAPGM,` which is an accelerated proximal gradient algorithm on the probability simplex. One critical hyperparameter is the stepsize, a reasonable first guess is `0.1*np.sqrt(binder_length)`. Another useful keyword argument is `scale`, which corresponds to $\ell_2$ regularization. Values larger than `1.0` encourage sparse solutions; a typical binder design run might start with `scale=1.0` to get an initial, soft solution and then ramp up to something higher to get a discrete solution. 
 
-`simplex_APGM` also accepts a keyword argument, `logspace,` to run the algorithm in logspace, e.g. as an accelerated proximal bregman method. In this case `scale` corresponds to (negative) entropic regularization: values greater than one encourage sparsity.
+`LogitAPGM` utilizes the same accerlerated proximal gradient approach than `SimplexAPGM`, but operates in log space, corresponding to an accelerated proximal bregman method. In this case `scale` corresponds to (negative) entropic regularization: values greater than one encourage sparsity.
 
 We also include a discrete optimization algorithm, `gradient_MCMC`, which is a variant of MCMC with a proposal distribution defined using a taylor approximation to the objective function (see [Plug & Play Directed Evolution of Proteins with Gradient-based Discrete MCMC](https://arxiv.org/abs/2212.09925).) This algorithm is especially useful for finetuning either existing designs or the result of continuous optimization.
+
+#### Multiphase Optimization
+SOTA hallucination-based de novo protein design frameworks such as [Bindcraft](https://doi.org/10.1038/s41586-025-09429-6), show the benefit of optimizing the PSSM with multiple phases, moving from soft matrices towards sharper ones that can be directly translated into sequences.
+
+The `MultiPhasesOptimization` class streamlines this process also coordinating trajectory logging allowing to combine multiple `SimplexAPGM` and `LogitAPGM` optimizers, for example:
+```python
+from mosaic.optimizers import MultiPhaseOptimization, Phase, SimplexAPGM
+# use increasing scale to drive optimization towards discrete a PSSM
+optimizer = MultiPhaseOptimization(
+        phases=[
+            Phase(
+                name="soft",
+                return_best=True,
+                optimizer=SimplexAPGM(
+                    loss_fn=loss,
+                    n_steps=100,
+                    stepsize=0.1,
+                    scale=1.0,
+                    momentum=0.9,
+                )
+            ),
+            Phase(
+                name="sharp",
+                optimizer=SimplexAPGM(
+                    loss_fn=loss,
+                    n_steps=25,
+                    stepsize=0.2,
+                    scale=1.1,
+                    momentum=0.9,
+                )
+            ),
+            Phase(
+                name="sharper",
+                optimizer=SimplexAPGM(
+                   loss_fn=loss,
+                    n_steps=25,
+                    stepsize=0.2,
+                    scale=1.5,
+                    momentum=0.0, 
+                )
+            )
+        ]
+    )
+```
+`gradient_mcmc` is not yet supported by `MultiPhaseOptimization`. 
 
 
 #### Loss transformations
@@ -396,6 +445,41 @@ We also provide a few [common transformations of loss functions](src/mosaic/loss
 loss = ClippedGradient(inverse_folding_LL, 1.0)  
     + ClippedGradient(ablang_pll, 1.0)
     + 0.25 * ClippedGradient(ESMCPLL, 1.0)
+```
+### Logging optimization trajectories
+Both `SimplexAPGM` and `LogitAPGM` (as well as combined in `MultiPhaseOptimization`) support trajectory logging via setting `log_trajectory=True`:
+```python
+import jax
+import numpy as np
+from mosaic.optimzer import SimplexAPGM
+
+pssm_init = jax.nn.softmax(
+    0.5
+    * jax.random.gumbel(
+        key=jax.random.key(np.random.randint(100000)),
+        shape=(binder_length, 20),
+    )
+)
+
+optimizer = SimplexAPGM(
+    loss_fn=loss,
+    n_steps=50,
+    stepsize=0.15,
+    momentum=0.3,
+    log_trajectory=True,
+)
+
+pssm_final, pssm_best, logger = optimizer.run(
+    pssm_init=pssm_init
+)
+```
+The `logger` object contains information about the evolution of the pssm and losses along the optization which can be saved with `logger.save(log_path)` resulting in:
+```
+log_path
+├── sequence.txt        # optimized sequence string
+├── trajectory.pkl      # picked trajectory dictionary
+├── losses.png          # plot of the loss evolution (optional)
+└── pssm_evolution.mp4  # video of pssm evolution (optional)
 ```
 
 ### Extensive theoretical discussion

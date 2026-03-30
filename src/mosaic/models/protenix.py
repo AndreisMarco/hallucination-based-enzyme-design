@@ -75,6 +75,7 @@ class Protenix(StructurePredictionModel):
         recycling_steps=1,
         sampling_steps=None,
         initial_recycling_state=None,
+        features_to_log: list[str] | None = None
     ):
         return self.build_multisample_loss(
             name=self.name,
@@ -84,6 +85,7 @@ class Protenix(StructurePredictionModel):
             sampling_steps=sampling_steps,
             num_samples=1,
             initial_recycling_state=initial_recycling_state,
+            features_to_log=features_to_log
         )
 
     def build_multisample_loss(

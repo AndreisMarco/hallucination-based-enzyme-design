@@ -91,6 +91,8 @@ def set_binder_sequence(new_sequence: Float[Array, "N 20"], features: PyTree):
     binder_profile = binder_profile.at[:, zero_msa_idx].set(
         (n_msa - n_fake_seq) / n_msa
     )
+    features["restype"] = jnp.array(features["restype"])
+    features["profile"] = jnp.array(features["profile"])
     # binder_profile = protenix_sequence
     return features | {
         "restype": features["restype"].at[:binder_len, :].set(protenix_sequence),

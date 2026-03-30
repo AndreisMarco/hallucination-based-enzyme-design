@@ -143,7 +143,21 @@ class Boltz2(StructurePredictionModel):
         binder = TargetChain(sequence="X" * binder_length, use_msa=False)
         self.target_only_features([binder])
  
-    def build_loss(self, *, loss, features, recycling_steps=1, sampling_steps=None):
+    def build_loss(
+            self, 
+            *, 
+            loss, 
+            features, 
+            recycling_steps=1, 
+            sampling_steps=None,
+            features_to_log: list[str] | None = None
+            ):
+        
+        if features_to_log is not None:
+            not_found = [f for f in features_to_log if f not in features.keys()]
+            if len(not_found) != 0: 
+                print(f"The following losses are not registered in the current model: {not_found}")
+
         return Boltz2Loss(
             joltz2=self.model,
             features=features,
@@ -151,6 +165,7 @@ class Boltz2(StructurePredictionModel):
             sampling_steps=sampling_steps if sampling_steps is not None else 25,
             loss=loss,
             deterministic=True,
+            features_to_log=features_to_log
         )
 
     def build_multisample_loss(
@@ -162,7 +177,7 @@ class Boltz2(StructurePredictionModel):
             num_samples: int = 4, 
             sampling_steps=None, 
             reduction=jnp.mean, 
-            features_to_log=None
+            features_to_log: list[str] | None = None
             ):
         
         if features_to_log is not None:

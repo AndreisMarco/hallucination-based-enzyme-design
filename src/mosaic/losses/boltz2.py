@@ -384,6 +384,7 @@ class Boltz2Loss(LossTerm):
     sampling_steps: int = 25
     name: str = "boltz2"
     initial_recycling_state: TrunkState | None = None
+    features_to_log: list[str] | None = None
 
     def __call__(self, sequence: Float[Array, "N 20"], key=None):
         """Compute the loss for a given sequence."""
@@ -407,6 +408,16 @@ class Boltz2Loss(LossTerm):
             key=key,
         )
 
+        # Include any additional specified features
+        if self.features_to_log is None:
+            feature_dict = {}
+        else: 
+            feature_dict = {k: features[k] for k in self.features_to_log if k in features.keys()}
+        
+        aux = {
+            "losses": aux,
+            "features": feature_dict
+        }
         return v, {self.name: aux}
 
 
