@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.21.0"
+__generated_with = "0.20.4"
 app = marimo.App(width="medium")
 
 
@@ -16,21 +16,22 @@ def _():
     from mosaic.losses.protein_mpnn import InverseFoldingSequenceRecovery
     import jax
     import mosaic
-    from mosaic.optimizers import simplex_APGM
+    from mosaic.optimizers import MultiPhaseOptimization, Phase, SimplexAPGM
     import jax.numpy as jnp
     import numpy as np
 
     return (
         InverseFoldingSequenceRecovery,
+        MultiPhaseOptimization,
         OF3,
+        Phase,
+        SimplexAPGM,
         TargetChain,
         gemmi,
         jax,
-        jnp,
         load_mpnn_sol,
         mo,
         np,
-        simplex_APGM,
         sp,
     )
 
@@ -51,23 +52,8 @@ def _(OF3):
 
 @app.cell
 def _():
-    binder_length = 120
+    binder_length = 20
     return (binder_length,)
-
-
-@app.cell
-def _(TargetChain, binder_length, of3, target_sequence, target_structure):
-    features, writer = of3.binder_features(
-        binder_length,
-        chains=[
-            TargetChain(
-                sequence=target_sequence,
-                use_msa=True,
-                template_chain=target_structure[0][0],
-            )
-        ],
-    )
-    return features, writer
 
 
 @app.cell
@@ -78,6 +64,21 @@ def _(gemmi):
         [r.name for r in target_structure[0][0]]
     )
     return target_sequence, target_structure
+
+
+@app.cell
+def _(TargetChain, binder_length, of3, target_sequence, target_structure):
+    features, writer = of3.binder_features(
+        binder_length,
+        chains=[
+            TargetChain(
+                sequence=target_sequence[:20],
+                use_msa=True,
+                template_chain=target_structure[0][0][:20],
+            )
+        ],
+    )
+    return features, writer
 
 
 @app.cell
@@ -128,8 +129,16 @@ def _(mo):
 
 
 @app.cell
-def _(binder_length, jax, loss, np, simplex_APGM):
-    PSSM = jax.nn.softmax(
+def _(
+    MultiPhaseOptimization,
+    Phase,
+    SimplexAPGM,
+    binder_length,
+    jax,
+    loss,
+    np,
+):
+    pssm_init = jax.nn.softmax(
         0.1
         * jax.random.gumbel(
             key=jax.random.key(np.random.randint(1000000)),
@@ -137,33 +146,52 @@ def _(binder_length, jax, loss, np, simplex_APGM):
         )
     )
 
-    _, PSSM = simplex_APGM(
-        loss_function=loss,
-        x=PSSM,
-        n_steps=100,
-        stepsize=0.15 * np.sqrt(binder_length),
-        momentum=0.1,
-        scale=1.0,
-        update_loss_state=False,
-        max_gradient_norm=1.0,
+    optimizer = MultiPhaseOptimization(
+        phases=[
+            Phase(
+                name="soft",
+                return_best=True,
+                optimizer=SimplexAPGM(
+                    loss_fn=loss,
+                    # n_steps = 100,
+                    n_steps=10,
+                    stepsize=0.15 * np.sqrt(binder_length),
+                    momentum=0.1,
+                    scale=1.0,
+                    update_loss_state=False,
+                    max_gradient_norm=1.0
+                )
+            ),
+            Phase(
+                name="sharp",
+                optimizer=SimplexAPGM(
+                    loss_fn=loss,
+                    # n_steps=20,
+                    n_steps = 2,
+                    stepsize=0.1 * np.sqrt(binder_length),
+                    momentum=0.0,
+                    scale=1.3,
+                    update_loss_state=False,
+                    max_gradient_norm=1.0
+                )
+            )
+        ]
     )
-    return (PSSM,)
+    return optimizer, pssm_init
 
 
 @app.cell
-def _(PSSM, binder_length, jnp, loss, np, simplex_APGM):
-    PSSM_sharper, _ = simplex_APGM(
-        loss_function=loss,
-        x=jnp.log(PSSM + 1e-5),
-        n_steps=20,
-        stepsize=0.1 * np.sqrt(binder_length),
-        momentum=0.0,
-        scale=1.3,
-        update_loss_state=False,
-        logspace=False,
-        max_gradient_norm=1.0,
-    )
+def _(optimizer, pssm_init):
+    PSSM_sharper, _, _ = optimizer.run(pssm_init) 
     return (PSSM_sharper,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Repredict optimized binder with target
+    """)
+    return
 
 
 @app.cell
@@ -176,6 +204,14 @@ def _(PSSM_sharper, features, jax, of3, writer):
         writer=writer,
     )
     return (pred,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Visualize prediction infos and save structure
+    """)
+    return
 
 
 @app.cell
@@ -212,11 +248,6 @@ def _(pdb_viewer, pred):
 @app.cell
 def _(mo, pred):
     mo.download(data=pred.st.make_pdb_string(), filename="binder.pdb")
-    return
-
-
-@app.cell
-def _():
     return
 
 
