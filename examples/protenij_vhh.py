@@ -1,11 +1,11 @@
 import marimo
 
-__generated_with = "0.20.4"
+__generated_with = "0.22.0"
 app = marimo.App(width="medium")
 
 with app.setup:
     import marimo as mo
-    from mosaic.optimizers import MultiPhaseOptimization, Phase, SimplexAPGM, LogitAPGM
+    from mosaic.optimizers import simplex_APGM
     import mosaic.losses.structure_prediction as sp
     import matplotlib.pyplot as plt
     import jax
@@ -225,49 +225,40 @@ def _(masked_framework_sequence):
 
 @app.cell
 def _(TOKENS, loss, pssm_init):
-    optimizer = MultiPhaseOptimization(
-        phases=[
-            Phase(name="soft_logit",
-                  return_best=True,
-                  optimizer=LogitAPGM(
-                      loss_fn=loss,
-                      # n_steps=50,
-                      n_steps=5,
-                      stepsize=1.5 * np.sqrt(pssm_init.shape[0]),
-                      momentum=0.2,
-                      scale=1.0,
-                      max_gradient_norm=1.0
-                  )
-                 ),
-            Phase(name="sharp_simplex",
-                  return_best=True,
-                  optimizer=SimplexAPGM(
-                      loss_fn=loss,
-                      # n_steps=30,
-                      n_steps=3,
-                      stepsize=0.5 * np.sqrt(pssm_init.shape[0]),
-                      momentum=0.0,
-                      scale=1.1,
-                      max_gradient_norm=1.0
-                  )
-                 ),
-            Phase(name="sharp_logit",
-                  return_best=True,
-                  optimizer=LogitAPGM(
-                      loss_fn=loss,
-                      # n_steps=30,
-                      n_steps=3,
-                      stepsize=0.25 * np.sqrt(pssm_init.shape[0]),
-                      momentum=0.0,
-                      scale=1.1,
-                      max_gradient_norm=1.0
-                  )
-                 )
-        ])
+    _, pssm_soft = simplex_APGM(
+        loss_function=loss,
+        x=pssm_init,
+        n_steps=50,
+        stepsize=1.5 * np.sqrt(pssm_init.shape[0]),
+        momentum=0.2,
+        scale=1.0,
+        max_gradient_norm=1.0,
+        logspace=True,
+    )
 
-    partial_pssm, _, _ = optimizer.run(pssm_init) 
-    print("".join(TOKENS[i] for i in partial_pssm.argmax(-1)))
-    return (partial_pssm,)
+    _, pssm_sharp = simplex_APGM(
+        loss_function=loss,
+        x=pssm_soft,
+        n_steps=30,
+        stepsize=0.5 * np.sqrt(pssm_init.shape[0]),
+        momentum=0.0,
+        scale=1.1,
+        max_gradient_norm=1.0,
+    )
+
+    _, pssm_partial = simplex_APGM(
+        loss_function=loss,
+        x=pssm_sharp,
+        n_steps=30,
+        stepsize=0.25 * np.sqrt(pssm_init.shape[0]),
+        momentum=0.0,
+        scale=1.1,
+        max_gradient_norm=1.0,
+        logspace=True,
+    )
+
+    print("".join(TOKENS[i] for i in pssm_partial.argmax(-1)))
+    return (pssm_partial,)
 
 
 @app.cell(hide_code=True)
@@ -286,12 +277,11 @@ def _():
 
 
 @app.cell
-def _(gradient_MCMC, loss, partial_pssm):
+def _(gradient_MCMC, loss, pssm_partial):
     s_mcmc = gradient_MCMC(
         loss=loss,
-        sequence=jax.device_put(partial_pssm.argmax(-1)),
-        # steps=30,
-        steps=3,
+        sequence=jax.device_put(pssm_partial.argmax(-1)),
+        steps=30,
         fix_loss_key=False,
         proposal_temp=1e-5,
         max_path_length=1,

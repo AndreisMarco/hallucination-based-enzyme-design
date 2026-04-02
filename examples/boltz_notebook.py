@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.20.4"
+__generated_with = "0.22.0"
 app = marimo.App(width="medium")
 
 with app.setup:
@@ -8,8 +8,8 @@ with app.setup:
     import marimo as mo
 
     import matplotlib.pyplot as plt
-    from mosaic.optimizers import MultiPhaseOptimization, Phase, SimplexAPGM
-    from mosaic.common import TOKENS
+    from mosaic.optimizers import simplex_APGM
+    from mosaic.common import TOKENS, LossTerm
     import numpy as np
 
     from mosaic.notebook_utils import pdb_viewer
@@ -122,46 +122,29 @@ def _():
 
 
 @app.cell
-def _(loss):
-    optimizer = MultiPhaseOptimization(
-        phases=[
-            Phase(
-                name="soft",
-                return_best=True,
-                optimizer=SimplexAPGM(
-                    loss_fn=loss,
-                    # n_steps=75,
-                    n_steps=7,
-                    stepsize=0.1,
-                    scale=1.0,
-                    momentum=0.0,
-                )
-            ),
-            Phase(
-                name="sharp",
-                optimizer=SimplexAPGM(
-                    loss_fn=loss,
-                    # n_steps=50,
-                    n_steps=5,
-                    stepsize=0.5,
-                    scale=1.5, # increasing scale pushes the pssm towards onehot-like matrices
-                    momentum=0.0,
-                )
-            )
-        ]
-    )
-    return (optimizer,)
-
-
-@app.cell
-def _(binder_length, optimizer):
+def _(binder_length, loss):
     pssm_init = 0.5 * jax.random.gumbel(
         key=jax.random.key(np.random.randint(100000)),
         shape=(binder_length, 20),
     )
 
-    pssm_sharp, intermediates, _  = optimizer.run(pssm_init) 
-    pssm_soft = intermediates["final"][0]
+    _, pssm_soft = simplex_APGM(
+        loss_function=loss,
+        x=pssm_init,
+        n_steps=75,
+        stepsize=0.1,
+        scale=1.0,
+        momentum=0.0,
+    )
+
+    pssm_sharp, _ = simplex_APGM(
+        loss_function=loss,
+        x=pssm_soft,
+        n_steps=25,
+        stepsize=0.5,
+        scale=1.5,
+        momentum=0.0,
+    )
     return pssm_sharp, pssm_soft
 
 
@@ -345,11 +328,11 @@ def _():
 
 @app.cell
 def _():
-    from mosaic.optimizers import _eval_loss_and_grad
+    from mosaic.optimizers import _eval_loss_and_grad as eval_loss_and_grad
 
     def jacobi(loss, iters, sequence, key):
         for _ in range(iters):
-            (v, aux), g = _eval_loss_and_grad(loss, jax.nn.one_hot(sequence, 20), key = key)
+            (v, aux), g = eval_loss_and_grad(loss, jax.nn.one_hot(sequence, 20), key = key)
             sequence = g.argmin(-1)
             print(v)
 
@@ -377,27 +360,17 @@ def _():
     return
 
 
-@app.cell
-def _():
-    from mosaic.common import LossTerm
+@app.class_definition
+class GumbelPerturbation(LossTerm):
+    key: any
 
-    return (LossTerm,)
-
-
-@app.cell
-def _(LossTerm):
-    class GumbelPerturbation(LossTerm):
-        key: any
-
-        def __call__(self, sequence, key):
-            v = (jax.random.gumbel(self.key, sequence.shape)*sequence).sum()
-            return v, {"gumbel": v}
-
-    return (GumbelPerturbation,)
+    def __call__(self, sequence, key):
+        v = (jax.random.gumbel(self.key, sequence.shape)*sequence).sum()
+        return v, {"gumbel": v}
 
 
 @app.cell
-def _(GumbelPerturbation, binder_length, if_ll, jacobi):
+def _(binder_length, if_ll, jacobi):
     seq_mpnn = jacobi(
         loss=if_ll + 0.0005 * GumbelPerturbation(jax.random.key(np.random.randint(1000000))),
         iters=10,
@@ -433,20 +406,18 @@ def _():
 
 @app.cell
 def _(binder_length, features, loss, predict, structure_writer):
-    optimizer_batch = SimplexAPGM(
-        loss_fn=loss,
-        # n_steps=75,
-        n_steps=5,
-        stepsize=0.1,
-        momentum=0.9,
-    )
-
     def design():
         pssm_init = 0.5 * jax.random.gumbel(
             key=jax.random.key(np.random.randint(100000)),
             shape=(binder_length, 20),
         )
-        pssm, _, _ = optimizer_batch.run(pssm_init)
+        pssm, _ = simplex_APGM(
+            loss_function=loss,
+            x=pssm_init,
+            n_steps=75,
+            stepsize=0.1,
+            momentum=0.9,
+        )
         prediction = predict(
             pssm, features, structure_writer
         )
