@@ -8,6 +8,10 @@ from matplotlib.animation import FFMpegWriter
 
 from mosaic.common import TOKENS
 
+# ============================================================================
+# Helper functions
+# ============================================================================
+
 def plot_losses(loss: np.ndarray, additional_losses: dict[np.ndarray] | None = None):
     steps = range(len(loss))
     fig, ax = plt.subplots(figsize=(10, 4))
@@ -23,8 +27,9 @@ def plot_losses(loss: np.ndarray, additional_losses: dict[np.ndarray] | None = N
     ax.set_xlabel("step")
     ax.set_ylabel("loss")
     ax.set_xlim(0, len(loss) - 1)
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncols=6, fontsize=8)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncols=4, fontsize=8)
     fig.tight_layout()
+    fig.subplots_adjust(bottom=0.25) 
     return fig
 
 def plot_pssm_heatmap(pssm, ax=None, return_wandb_image: bool = False):
@@ -60,6 +65,10 @@ def make_pssm_video(pssm_trajectory, output_path: str = "pssm_trajectory.mp4", f
             writer.grab_frame()
     plt.close(fig)
     return output_path
+
+# ============================================================================
+# Logger class
+# ============================================================================
 
 def _default_is_leaf(x):
     """A list of non-dict items is treated as a trajectory leaf (not traversed further)."""
@@ -217,6 +226,10 @@ class TrajectoryLogger:
             )
 
         print(f"Saved logs to: {log_path}")
+
+# ============================================================================
+# wandb logging
+# ============================================================================
 
 def aux_to_wandb(aux):
     log = {}
