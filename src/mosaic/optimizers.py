@@ -424,13 +424,6 @@ def simplex_APGM(
             aux,
         )
 
-<<<<<<< HEAD
-    def make_wandb_config(self):
-        config = {}
-        for phase in self.phases:
-            config[phase.name] = phase.optimizer.make_wandb_config()
-        return config
-=======
     if logspace:
         x = jax.nn.softmax(x)
         best_x = jax.nn.softmax(best_x)
@@ -440,4 +433,3 @@ def simplex_APGM(
     else:
         logger.clean_trajectory()
         return x, best_x, logger    
->>>>>>> d511baa (Roll back to functional simplex_APGM and add trajectory logging)
