@@ -428,8 +428,7 @@ def _(binder_length, features, loss, predict, structure_writer):
 
 @app.cell
 def _(design):
-    # designs = [design() for _ in mo.status.progress_bar(range(10))]
-    designs = [design() for _ in mo.status.progress_bar(range(2))]
+    designs = [design() for _ in mo.status.progress_bar(range(10))]
     return (designs,)
 
 
