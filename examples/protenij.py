@@ -1,11 +1,11 @@
 import marimo
 
-__generated_with = "0.20.4"
+__generated_with = "0.22.0"
 app = marimo.App()
 
 with app.setup:
     import marimo as mo
-    from mosaic.optimizers import SimplexAPGM, MultiPhaseOptimization, Phase
+    from mosaic.optimizers import simplex_APGM
     import mosaic.losses.structure_prediction as sp
     import matplotlib.pyplot as plt
     import jax
@@ -137,47 +137,33 @@ def _(binder_length, loss):
         )
     )
 
-    optimizer = MultiPhaseOptimization(
-        phases=[
-            Phase(
-                name="soft",
-                return_best=True,
-                optimizer=SimplexAPGM(
-                    loss_fn=loss,
-                    n_steps = 100,
-                    stepsize=0.15 * np.sqrt(binder_length),
-                    momentum=0.3,
-                    scale=1.0,
-                    update_loss_state=False,
-                    max_gradient_norm=1.0
-                )
-            ),
-            Phase(
-                name="sharp",
-                optimizer=SimplexAPGM(
-                    loss_fn=loss,
-                    n_steps=20,
-                    stepsize=0.5 * np.sqrt(binder_length),
-                    momentum=0.0,
-                    scale=1.3,
-                    update_loss_state=False,
-                    max_gradient_norm=1.0
-                )
-            )
-        ]
+    _, pssm_soft = simplex_APGM(
+        loss_function=loss,
+        x=pssm_init,
+        n_steps=100,
+        stepsize=0.15 * np.sqrt(binder_length),
+        momentum=0.3,
+        scale=1.0,
+        update_loss_state=False,
+        max_gradient_norm=1.0,
     )
-    return optimizer, pssm_init
+
+    pssm_sharp, _ = simplex_APGM(
+        loss_function=loss,
+        x=pssm_soft,
+        n_steps=25,
+        stepsize=0.5 * np.sqrt(binder_length),
+        momentum=0.0,
+        scale=1.3,
+        update_loss_state=False,
+        max_gradient_norm=1.0,
+    )
+    return (pssm_sharp,)
 
 
 @app.cell
-def _(optimizer, pssm_init):
-    PSSM_sharper, _, _ = optimizer.run(pssm_init) 
-    return (PSSM_sharper,)
-
-
-@app.cell
-def _(PSSM_sharper):
-    plt.imshow(PSSM_sharper)
+def _(pssm_sharp):
+    plt.imshow(pssm_sharp)
     return
 
 
@@ -193,17 +179,33 @@ def _(protenix_pred):
     return
 
 
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    Repredict optimized binder with target
+    """)
+    return
+
+
 @app.cell
-def _(PSSM_sharper, design_features, design_structure, protenix):
+def _(design_features, design_structure, protenix, pssm_sharp):
     # repredict design with recycling
     protenix_pred = protenix.predict(
-        PSSM=PSSM_sharper,
+        PSSM=pssm_sharp,
         features=design_features,
         recycling_steps=4,
         key=jax.random.key(0),
         writer=design_structure,
     )
     return (protenix_pred,)
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    Visualize prediction infos and save structure
+    """)
+    return
 
 
 @app.cell

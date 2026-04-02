@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.20.4"
+__generated_with = "0.22.0"
 app = marimo.App(width="full")
 
 with app.setup:
@@ -9,10 +9,7 @@ with app.setup:
     import marimo as mo
     import numpy as np
     import matplotlib.pyplot as plt
-    from mosaic.optimizers import (
-        SimplexAPGM, Phase, MultiPhaseOptimization,
-        gradient_MCMC,
-    )
+    from mosaic.optimizers import simplex_APGM, gradient_MCMC
     import mosaic.losses.structure_prediction as sp
     from mosaic.models.boltz1 import Boltz1
 
@@ -111,64 +108,40 @@ def _():
 
 
 @app.cell
-def _(loss):
+def _(binder_length, loss):
     # we can sharpen these logits using weight decay, i.e. increasing scale (which is equivalent to adding entropic regularization)
-    optimizer = MultiPhaseOptimization(
-        phases=[
-            Phase(
-                name="soft",
-                return_best=True,
-                optimizer=SimplexAPGM(
-                    loss_fn=loss,
-                    n_steps=100,
-                    stepsize=0.1,
-                    scale=1.0,
-                    momentum=0.9,
-                )
-            ),
-            Phase(
-                name="sharp",
-                optimizer=SimplexAPGM(
-                    loss_fn=loss,
-                    n_steps=25,
-                    stepsize=0.2,
-                    scale=1.1,
-                    momentum=0.9,
-                )
-            ),
-            Phase(
-                name="sharper",
-                optimizer=SimplexAPGM(
-                   loss_fn=loss,
-                    n_steps=25,
-                    stepsize=0.2,
-                    scale=1.5,
-                    momentum=0.0, 
-                )
-            )
-        ]
-    )
-    return (optimizer,)
-
-
-@app.cell
-def _(binder_length, optimizer):
     pssm_init = 0.5 * jax.random.gumbel(
         key=jax.random.key(np.random.randint(100000)),
         shape=(binder_length, 20),
     )
 
-    pssm_sharper, intermediates, _  = optimizer.run(pssm_init) 
-    pssm_soft = intermediates["final"][0]
-    return pssm_sharper, pssm_soft
+    _, pssm_soft = simplex_APGM(
+        loss_function=loss,
+        x=pssm_init,
+        n_steps=100,
+        stepsize=0.1,
+        scale=1.0,
+        momentum=0.9,
+    )
 
+    _, pssm_intermediate = simplex_APGM(
+        loss_function=loss,
+        x=pssm_soft,
+        n_steps=25,
+        stepsize=0.2,
+        scale=1.1,
+        momentum=0.9,
+    )
 
-@app.cell(hide_code=True)
-def _():
-    mo.md(r"""
-    Predict and visualize the output of the first phase and of the third phase
-    """)
-    return
+    pssm_sharp, _ = simplex_APGM(
+        loss_function=loss,
+        x=pssm_intermediate, 
+        n_steps=25,
+        stepsize=0.2,
+        scale=1.5,
+        momentum=0.0,
+    )
+    return pssm_sharp, pssm_soft
 
 
 @app.cell
@@ -195,17 +168,17 @@ def _():
 
 
 @app.cell
-def _(boltz_features, boltz_writer, predict, pssm_sharper):
+def _(boltz_features, boltz_writer, predict, pssm_sharp):
     sharp_outputs, _viewer = predict(
-        pssm_sharper, boltz_features, boltz_writer
+        pssm_sharp, boltz_features, boltz_writer
     )
     _viewer
     return (sharp_outputs,)
 
 
 @app.cell
-def _(pssm_sharper, sharp_outputs, visualize_output):
-    visualize_output(sharp_outputs, pssm_sharper)
+def _(pssm_sharp, sharp_outputs, visualize_output):
+    visualize_output(sharp_outputs, pssm_sharp)
     return
 
 
@@ -220,8 +193,8 @@ def _():
 
 
 @app.cell
-def _(af2, af_features, pssm_sharper):
-    _o_af_repredict = af2.predict(features=af_features, PSSM = pssm_sharper, key = jax.random.key(12))
+def _(af2, af_features, pssm_sharp):
+    _o_af_repredict = af2.predict(features=af_features, PSSM = pssm_sharp, key = jax.random.key(12))
     print(_o_af_repredict.iptm)
     pdb_viewer(_o_af_repredict.st)
     return
@@ -405,46 +378,32 @@ def _():
 
 
 @app.cell
-def _(af_loss):
-    optimizer_af = MultiPhaseOptimization(
-        phases=[
-            Phase(
-                name="soft",
-                return_best=True,
-                optimizer=SimplexAPGM(
-                    loss_fn=af_loss,
-                    n_steps=100,
-                    stepsize=0.1,
-                    scale=1.0,
-                    momentum=0.0,
-                    serial_evaluation=True
-                )
-            ),
-            Phase(
-                name="sharper",
-                optimizer=SimplexAPGM(
-                    loss_fn=af_loss,
-                    n_steps=25,
-                    stepsize=0.2,
-                    scale=1.5,
-                    momentum=0.0,
-                    serial_evaluation=True
-                )
-            )
-        ]
-    )
-    return (optimizer_af,)
-
-
-@app.cell
-def _(binder_length, optimizer_af):
+def _(af_loss, binder_length):
     pssm_init_af = 0.5 * jax.random.gumbel(
         key=jax.random.key(np.random.randint(100000)),
         shape=(binder_length, 20),
     )
 
-    pssm_sharper_af, _, _  = optimizer_af.run(pssm_init_af) 
-    return (pssm_sharper_af,)
+    _, pssm_soft_af = simplex_APGM(
+        loss_function=af_loss,
+        x=pssm_init_af,
+        n_steps=100,
+        stepsize=0.1,
+        scale=1.0,
+        momentum=0.0,
+        serial_evaluation=True,
+    )
+
+    pssm_sharp_af, _ = simplex_APGM(
+        loss_function=af_loss,
+        x=pssm_soft_af,
+        n_steps=25,
+        stepsize=0.2,
+        scale=1.5,
+        momentum=0.0,
+        serial_evaluation=True,
+    )
+    return (pssm_sharp_af,)
 
 
 @app.cell(hide_code=True)
@@ -456,28 +415,28 @@ def _():
 
 
 @app.cell
-def _(boltz_features, boltz_writer, predict, pssm_sharper_af):
-    boltz_output, _viewer = predict(pssm_sharper_af, boltz_features, boltz_writer)
+def _(boltz_features, boltz_writer, predict, pssm_sharp_af):
+    boltz_output, _viewer = predict(pssm_sharp_af, boltz_features, boltz_writer)
     _viewer
     return (boltz_output,)
 
 
 @app.cell
-def _(boltz_output, pssm_sharper_af, visualize_output):
-    visualize_output(boltz_output, pssm_sharper_af)
+def _(boltz_output, pssm_sharp_af, visualize_output):
+    visualize_output(boltz_output, pssm_sharp_af)
     return
 
 
 @app.cell
-def _(af2, af_features, pssm_sharper_af):
-    af_o = af2.predict(PSSM = pssm_sharper_af, features=af_features,key = jax.random.key(1))
+def _(af2, af_features, pssm_sharp_af):
+    af_o = af2.predict(PSSM = pssm_sharp_af, features=af_features,key = jax.random.key(1))
     pdb_viewer(af_o.st)
     return (af_o,)
 
 
 @app.cell
-def _(af_o, pssm_sharper_af, visualize_output):
-    visualize_output(af_o, pssm_sharper_af)
+def _(af_o, pssm_sharp_af, visualize_output):
+    visualize_output(af_o, pssm_sharp_af)
     return
 
 
@@ -490,10 +449,10 @@ def _():
 
 
 @app.cell
-def _(af_loss, pssm_sharper_af):
+def _(af_loss, pssm_sharp_af):
     seq_mcmc = gradient_MCMC(
         af_loss,
-        jax.device_put(pssm_sharper_af.argmax(-1)),
+        jax.device_put(pssm_sharp_af.argmax(-1)),
         temp=0.001,
         proposal_temp=0.00001,
         steps=100,
@@ -518,8 +477,8 @@ def _():
 
 
 @app.cell
-def _(pssm_sharper_af):
-    "".join([TOKENS[i] for i in pssm_sharper_af.argmax(-1)])
+def _(pssm_sharp_af):
+    "".join([TOKENS[i] for i in pssm_sharp_af.argmax(-1)])
     return
 
 
@@ -578,25 +537,19 @@ def _():
 
 
 @app.cell
-def _(af_loss, loss):
-    combined_optimizer = SimplexAPGM(
-        loss_fn=af_loss + loss,
+def _(af_loss, binder_length, loss):
+    pssm_init_both = 0.5 * jax.random.gumbel(
+        key=jax.random.key(np.random.randint(100000)),
+        shape=(binder_length, 20),
+    )
+    _, pssm_both = simplex_APGM(
+        loss_function=af_loss + loss,
+        x=pssm_init_both,
         n_steps=150,
         stepsize=0.15,
         momentum=0.0,
         serial_evaluation=True
     )
-    return (combined_optimizer,)
-
-
-@app.cell
-def _(binder_length, combined_optimizer):
-    pssm_init_both = 0.5 * jax.random.gumbel(
-        key=jax.random.key(np.random.randint(100000)),
-        shape=(binder_length, 20),
-    )
-
-    _, pssm_both, _ = combined_optimizer.run(pssm_init_both)
     return (pssm_both,)
 
 
