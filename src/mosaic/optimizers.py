@@ -10,7 +10,7 @@ import wandb
 import time
 from dataclasses import dataclass
 
-from mosaic.logger import TrajectoryLogger, aux_to_wandb
+from mosaic.logger import TrajectoryLogger
 
 AbstractLoss = LossTerm | LinearCombination
 
@@ -95,15 +95,17 @@ def update_states(aux, loss):
 # Helper functions 
 # ============================================================================
 
-def _print_iter(i, aux):
+def _print_iter(i, aux, minimal=True):
     def is_scalar_float(x):
         return isinstance(x, (float, jax.Array, np.ndarray)) and jnp.ndim(x) == 0
     metrics = {}
     for path, v in jax.tree_util.tree_leaves_with_path(aux):
-        if not is_scalar_float(v):
-            continue
         parts = [str(p.key) for p in path if hasattr(p, "key")]
         path_str = ".".join(parts) if parts else "value"
+        if minimal and ("optim" not in path_str):
+            continue
+        if not is_scalar_float(v):
+            continue
         if "state_index" in path_str:
             continue
         metrics[path_str] = float(v)
@@ -144,202 +146,9 @@ def standardize_aux(aux):
     return standardized
 
 # ============================================================================
-# Base Optimizer Class 
-# ============================================================================
-
-class PSSMOptimizer(ABC):
-    def __init__(self,
-                loss_fn, 
-                n_steps: int = 50,
-                update_mask: Bool[Array, "N"] | None = None,
-                max_gradient_norm: float | None = None,
-                update_loss_state: bool = False,
-                serial_evaluation: bool = False,
-                sample_loss: bool = False,
-                log_trajectory: bool = False,
-                wandb_project: str | None = None
-                ):
-
-        self.loss_fn = loss_fn
-        self.n_steps = n_steps
-        self.update_mask = update_mask
-        self.max_gradient_norm = max_gradient_norm
-        self.update_loss_state = update_loss_state
-        self.serial_evaluation = serial_evaluation
-        self.sample_loss = sample_loss
-        self.log_trajectory = log_trajectory
-        self.wandb_project = wandb_project
-
-        if (self.log_trajectory or self.wandb_project is not None) and self.sample_loss:
-            # TODO: maybe pad with zeros the non-sampled losses in traj.update?
-            raise NotImplementedError(
-                f"Currently using sample_loss is not compatible with logging the trajectory or to wandb"
-            )
-
-    @abstractmethod
-    def step(self, state, key):
-        pass
-
-    def run(self, 
-            pssm_init: Float[Array, "N 20"],
-            traj_logger: TrajectoryLogger | None = None,
-            key: Any | None = None,
-            ):
-        
-        if key is None: 
-            key = jax.random.key(np.random.randint(10000))
-        
-        update_mask = self.update_mask if self.update_mask is not None \
-                                       else jnp.ones(shape=(pssm_init.shape[0],), dtype=bool)
-        if self.max_gradient_norm is None:
-            self.max_gradient_norm = np.sqrt(pssm_init.shape[0])
-
-        if self.log_trajectory:
-            traj_logger = TrajectoryLogger()
-
-        if self.wandb_project is not None and wandb.run is None:
-            raise NotImplementedError(f"wandb support for single optimizer run is not directly supported, " \
-                                      "the desired behavior can be achieved by wrapping the optimizer in MultiPhaseOptimization")
-
-        state = {"x": pssm_init, "mask": update_mask,}
-        best_loss = np.inf
-        best_pssm = pssm_init
-        for i in range(self.n_steps):
-            start_time = time.time()
-
-            state, loss, aux = self.step(state, key)
-            key = jax.random.fold_in(key, i)
-
-            if self.update_loss_state:
-                self.loss_fn = update_states(aux, self.loss_fn)
-
-            if loss < best_loss and not np.isnan(loss):
-                best_loss = loss
-                best_pssm = state["x"]
-
-            aux = standardize_aux(aux)
-            aux.update({"optim": {
-                "loss": loss,
-                "nnz": (state["x"] > 0.01).sum(-1).mean(),
-                "time": time.time() - start_time,
-                "pssm": state["x"],
-            }})
-
-            if self.log_trajectory:
-                traj_logger.update(aux=aux)
-
-            if wandb.run is not None:
-                wandb.log(aux_to_wandb(aux))
-
-            _print_iter(i, aux)
-
-        return state["x"], best_pssm, traj_logger
-
-    def clip_gradient(self, g):
-        n = np.sqrt((g**2).sum())
-        if n > self.max_gradient_norm:
-            g = g * (self.max_gradient_norm / n)
-        return g
-    
-    def make_wandb_config(self):
-        return {
-            "opt_configs": {k: v for k, v in vars(self).items() if isinstance(v, (int, float, str, bool))},
-            "losses": {str(l).strip('()'): float(w) \
-                           for l, w in zip(self.loss_fn.loss.l, self.loss_fn.loss.weights)}
-        }
-
-# ============================================================================
 # Optimizers
 # ============================================================================
 
-def projection_simplex(V, z=1):
-    V = np.array(V, dtype=np.float64)
-    n_features = V.shape[1]
-    U = np.sort(V, axis=1)[:, ::-1]
-    z = np.ones(len(V)) * z
-    cssv = np.cumsum(U, axis=1) - z[:, np.newaxis]
-    ind = np.arange(n_features) + 1
-    cond = U - cssv / ind > 0
-    rho = np.count_nonzero(cond, axis=1)
-    theta = cssv[np.arange(len(V)), rho - 1] / rho
-    return np.maximum(V - theta[:, np.newaxis], 0)
-
-class SimplexAPGM(PSSMOptimizer):
-    def __init__(self, stepsize, scale=1.0, momentum=0.0, **kwargs):
-        super().__init__(**kwargs)
-        self.stepsize = stepsize
-        self.momentum = momentum
-        self.scale = scale
-
-    def step(self, state, key):
-        if "x_prev" not in state:
-            state["x"] = projection_simplex(state["x"]) # ensure input is on simplex
-            state["x_prev"] = state["x"]
-
-        x = state["x"]
-        x_prev = state["x_prev"]
-        v = jax.device_put(x + self.momentum * (x - x_prev))
-
-        (loss, aux), g = _eval_loss_and_grad(
-            loss_function=self.loss_fn,
-            x=v, # v is already in simplex space
-            key=key,
-            serial_evaluation=self.serial_evaluation,
-            sample_loss=self.sample_loss,
-        )
-
-        g = self.clip_gradient(g) * state["mask"][:, None]
-        new_x = projection_simplex(self.scale * (v - self.stepsize * g)) # ensure new_x stays on simplex
-        state["x"] = new_x
-        state["x_prev"] = x
-
-        return state, loss, aux
-
-
-class LogitAPGM(PSSMOptimizer):
-    def __init__(self, stepsize, scale=1.0, momentum=0.0, **kwargs):
-        super().__init__(**kwargs)
-        self.stepsize = stepsize
-        self.momentum = momentum
-        self.scale = scale
-
-    def step(self, state, key):
-        if "x_prev_logit" not in state:
-            state["x_logit"] = jax.nn.log_softmax(state["x"]) # convert to logit space
-            state["x_prev_logit"] = state["x_logit"]
-
-        x_logit = state["x_logit"]
-        x_prev_logit = state["x_prev_logit"]
-        v = jax.device_put(x_logit + self.momentum * (x_logit - x_prev_logit))
-
-        (loss, aux), g = _eval_loss_and_grad(
-            loss_function=self.loss_fn,
-            x=jax.nn.softmax(v), # evaluation works in simplex space
-            key=key,
-            serial_evaluation=self.serial_evaluation,
-            sample_loss=self.sample_loss,
-        )
-
-        g = self.clip_gradient(g) * state["mask"][:, None]
-        new_x_logit = self.scale * (v - self.stepsize * g)
-        state["x_logit"] = new_x_logit
-        state["x_prev_logit"] = x_logit
-        state["x"] = jax.nn.softmax(new_x_logit, axis=-1) # save new_x in simplex space
-
-        return state, loss, aux
-
-
-# ============================================================================
-# MCMC optimizer (does not really match with the other optimizers)
-# ============================================================================
-    
-# def _proposal(sequence, g, temp, alphabet_size: int = 20):
-#     input = jax.nn.one_hot(sequence, alphabet_size)
-#     g_i_x_i = (g * input).sum(-1, keepdims=True)
-#     logits = -((input * g).sum() - g_i_x_i + g) / temp
-#     return jax.nn.softmax(logits), jax.nn.log_softmax(logits)
-
-# rewrite in numpy to use float64
 from scipy.special import softmax, log_softmax 
 def _proposal(sequence, g, temp, alphabet_size: int = 20):
     input = np.eye(alphabet_size)[sequence]
@@ -360,6 +169,8 @@ def gradient_MCMC(
     detailed_balance: bool = False,
     fix_loss_key: bool = True,
     serial_evaluation: bool = False,
+    log_trajectory: bool = False,
+    on_step: Callable | None = None,
 ):
     """
     Implements the gradient-assisted MCMC sampler from "Plug & Play Directed Evolution of Proteins with
@@ -386,6 +197,10 @@ def gradient_MCMC(
     (v_0, aux_0), g_0 = _eval_loss_and_grad(
         loss, jax.nn.one_hot(sequence, alphabet_size), key=key_model, serial_evaluation=serial_evaluation
     )
+
+    if log_trajectory:
+        logger = TrajectoryLogger()
+
     for iter in range(steps):
         start_time = time.time()
         ### generate a proposal
@@ -454,100 +269,175 @@ def gradient_MCMC(
             sequence = proposal
             (v_0, aux_0), g_0 = (v_1, aux_1), g_1
         
-        _print_iter(iter, {"loss": v_0, "": aux_0, "time": time.time() - start_time})
-        
+        # add optimization info to aux 
+        aux = standardize_aux(aux_0)
+        aux.update({"optim": {
+                "loss": v_0,
+                "time": time.time() - start_time,
+                "nnz": 1.0,
+                "pssm": jax.nn.one_hot(sequence, alphabet_size),
+            }})
+
+        if log_trajectory: 
+            logger.update(aux)
+
+        if on_step is not None:
+            on_step(iter, aux)
+
+        _print_iter(
+            iter,
+            aux,
+        )
 
         key = jax.random.fold_in(key, 0)
 
-    return sequence
+    if not log_trajectory:
+        return sequence 
+    else:
+        logger.clean_trajectory()
+        return sequence, logger
 
-# ============================================================================
-# Multi Phase Optimization Handlign
-# ============================================================================
 
-@dataclass
-class Phase:
-    optimizer: PSSMOptimizer
-    name: str
-    return_best: bool = False
+def projection_simplex(V, z=1):
+    V = np.array(V, dtype=np.float64)
+    n_features = V.shape[1]
+    U = np.sort(V, axis=1)[:, ::-1]
+    z = np.ones(len(V)) * z
+    cssv = np.cumsum(U, axis=1) - z[:, np.newaxis]
+    ind = np.arange(n_features) + 1
+    cond = U - cssv / ind > 0
+    rho = np.count_nonzero(cond, axis=1)
+    theta = cssv[np.arange(len(V)), rho - 1] / rho
+    return np.maximum(V - theta[:, np.newaxis], 0)
 
-class MultiPhaseOptimization:
-    def __init__(self, 
-                 phases: List[Phase],
-                 log_trajectory: bool = False,
-                 wandb_project: str | None = None):
-        
-        self.phases = phases
-        self.log_trajectory = log_trajectory
-        self.wandb_project = wandb_project
 
-        if self.log_trajectory:
-            for phase in self.phases:
-                if phase.optimizer.log_trajectory is False:
-                    phase.optimizer.log_trajectory = True
-                    print(f"[MultiPhaseOptimization] Setting log_trajectory=True for phase '{phase.name}'")
-                
-        if self.wandb_project is not None:
-            for phase in self.phases:
-                if phase.optimizer.wandb_project != self.wandb_project:
-                    phase.optimizer.wandb_project = self.wandb_project
-                    print(f"[MultiPhaseOptimization] Setting wandb_project='{self.wandb_project}' for phase '{phase.name}'")
+def simplex_APGM(
+    *,
+    loss_function,
+    x: Float[Array, "N 20"],
+    n_steps: int,
+    stepsize: float,
+    momentum: float = 0.0,
+    key=None,
+    max_gradient_norm: float | None = None,
+    update_loss_state: bool = False,
+    scale=1.0,
+    logspace: bool = False,
+    serial_evaluation: bool = False,
+    sample_loss: bool = False,
+    log_trajectory: bool = False,
+    on_step: Callable | None = None,
+):
+    """
+    Accelerated projected gradient descent on the simplex.
 
-    def run(self,
-            pssm_init: Float[Array, "N 20"], 
-            key: Any | None = None):
+    Args:
+    - loss_function: function to minimize
+    - x: initial sequence
+    - n_steps: number of optimization steps
+    - stepsize: step size for gradient descent
+    - momentum: momentum factor
+    - key: jax random key
+    - max_gradient_norm: maximum norm of the gradient
+    - update_loss_state: whether to update the loss function state
+    - scale: proximal scaling factor for L2 regularization (or entropic regularization if logspace=True), set to > 1.0 to encourage sparsity
+    - trajectory_fn: function to compute trajectory information, takes (aux, x) and returns any value.
+    - logspace: whether to optimize in log space, which corresponds to a bregman proximal algorithm.
 
-        if key is None: 
-            key = jax.random.key(np.random.randint(10000))
+    returns:
+    - x: final soft sequence after optimization
+    - best_x: best soft sequence found during optimization
+    - trajectory: list of trajectory information if `trajectory_fn` is provided, otherwise nothing.
+    """
 
-        if self.wandb_project is not None:
-            wandb.init(
-                project=self.wandb_project,
-                config=self.make_wandb_config()
+    if max_gradient_norm is None:
+        max_gradient_norm = np.sqrt(x.shape[0])
+
+    if key is None:
+        key = jax.random.key(np.random.randint(0, 10000))
+
+    best_val = np.inf
+    x = projection_simplex(x) if not logspace else x
+    best_x = x
+
+    x_prev = x
+
+    if log_trajectory:
+        logger = TrajectoryLogger()
+
+    for _iter in range(n_steps):
+        start_time = time.time()
+        v = jax.device_put(x + momentum * (x - x_prev))
+        (value, aux), g = _eval_loss_and_grad(
+            x=v if not logspace else jax.nn.softmax(v),
+            loss_function=loss_function,
+            key=key,
+            serial_evaluation=serial_evaluation,
+            sample_loss=sample_loss,
+        )
+
+        n = np.sqrt((g**2).sum())
+        if n > max_gradient_norm:
+            g = g * (max_gradient_norm / n)
+
+        key = jax.random.fold_in(key, 0)
+
+        if logspace:
+            x_new = scale * (v - stepsize * g)
+        else:
+            x_new = projection_simplex(scale * (v - stepsize * g))
+
+        x_prev = x
+        x = x_new
+
+        if value < best_val and not np.isnan(value):
+            best_val = value
+            best_x = (
+                x  # this isn't exactly right, because we evaluated loss at v, not x.
             )
 
-        current_pssm = pssm_init
-        traj_loggers = []
-        all_final = np.zeros(shape=(len(self.phases), *pssm_init.shape))
-        all_best = np.zeros_like(all_final)
-        for i, phase in enumerate(self.phases):
-            print(f"Starting phase {phase.name} - ({i+1}/{len(self.phases)})")
-            final_pssm, best_pssm, logger  = phase.optimizer.run(
-                pssm_init=current_pssm, 
-                key=key)
-            
-            all_final[i] = final_pssm
-            all_best[i] = best_pssm
-            
-            if phase.return_best:
-                current_pssm = best_pssm
-                if self.log_trajectory:
-                    best_step = int(np.argmin(logger.trajectory_list["optim"]["loss"]))
-                    logger = logger[:best_step + 1]
-            else:
-                current_pssm = final_pssm
-
-            if self.log_trajectory:
-                traj_loggers.append(logger)
-
-            key = jax.random.fold_in(key, i)
+        if update_loss_state:
+            loss_function = update_states(aux, loss_function)
         
-        full_logger = None
-        if self.log_trajectory:
-            full_logger = traj_loggers[0]
-            for logger in traj_loggers[1:]:
-                full_logger += logger
-            full_logger.clean_trajectory()
+        # add optimization info to aux 
+        aux = standardize_aux(aux)
+        average_nnz = (
+            (x > 0.01).sum(-1).mean()
+            if not logspace
+            else (jax.nn.softmax(x) > 0.01).sum(-1).mean()
+        )
+        aux.update({"optim": {
+                "loss": value,
+                "nnz": average_nnz,
+                "time": time.time() - start_time,
+                "pssm": x,
+            }})
+        
+        if log_trajectory:
+            logger.update(aux)
 
-        if wandb.run is not None:
-            wandb.finish()
+        if on_step is not None:
+            on_step(_iter, aux)
 
-        phase_results = {"final": all_final, "best": all_best}
-        pssm = all_best[-1] if self.phases[-1].return_best else all_final[-1]
-        return pssm, phase_results, full_logger
+        _print_iter(
+            _iter,
+            aux,
+        )
 
+<<<<<<< HEAD
     def make_wandb_config(self):
         config = {}
         for phase in self.phases:
             config[phase.name] = phase.optimizer.make_wandb_config()
         return config
+=======
+    if logspace:
+        x = jax.nn.softmax(x)
+        best_x = jax.nn.softmax(best_x)
+
+    if not log_trajectory:
+        return x, best_x
+    else:
+        logger.clean_trajectory()
+        return x, best_x, logger    
+>>>>>>> d511baa (Roll back to functional simplex_APGM and add trajectory logging)
