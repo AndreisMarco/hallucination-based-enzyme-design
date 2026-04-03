@@ -2,13 +2,10 @@ import equinox as eqx
 import jax
 import numpy as np
 import jax.numpy as jnp
-from jaxtyping import Array, Float, Int, Bool
-from typing import Callable, Tuple, List, Any
+from jaxtyping import Array, Float, Int
+from typing import Callable
 from mosaic.common import is_state_update, has_state_index, LossTerm, LinearCombination
-from abc import ABC, abstractmethod
-import wandb
 import time
-from dataclasses import dataclass
 
 from mosaic.logger import TrajectoryLogger
 
@@ -432,4 +429,4 @@ def simplex_APGM(
         return x, best_x
     else:
         logger.clean_trajectory()
-        return x, best_x, logger    
+        return x, best_x, logger
