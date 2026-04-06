@@ -6,6 +6,7 @@ from jaxtyping import Array, Float, Int
 from typing import Callable
 from mosaic.common import is_state_update, has_state_index, LossTerm, LinearCombination
 import time
+from mosaic.losses.transformations import NoCys, SetPositions
 
 from mosaic.logger import TrajectoryLogger
 
@@ -142,6 +143,17 @@ def standardize_aux(aux):
 
     return standardized
 
+def clean_pssm(PSSM, loss):       
+    '''
+    Unwraps loss transformations which modify the pssm returning a clean pssm 
+    '''                                                                
+    if isinstance(loss, NoCys):
+        PSSM = NoCys.sequence(PSSM)
+        loss = loss.loss                                
+    if isinstance(loss, SetPositions):
+        PSSM = loss.sequence(seq=PSSM)                                                            
+    return PSSM    
+
 # ============================================================================
 # Optimizers
 # ============================================================================
@@ -272,7 +284,7 @@ def gradient_MCMC(
                 "loss": v_0,
                 "time": time.time() - start_time,
                 "nnz": 1.0,
-                "pssm": jax.nn.one_hot(sequence, alphabet_size),
+                "pssm": clean_pssm(jax.nn.one_hot(sequence, alphabet_size), loss),
             }})
 
         if log_trajectory: 
@@ -407,7 +419,8 @@ def simplex_APGM(
                 "loss": value,
                 "nnz": average_nnz,
                 "time": time.time() - start_time,
-                "pssm": x if not logspace else jax.nn.softmax(x),
+                "pssm": clean_pssm(x, loss_function) if not logspace \
+                        else clean_pssm(jax.nn.softmax(x), loss_function),
             }})
         
         if log_trajectory:
