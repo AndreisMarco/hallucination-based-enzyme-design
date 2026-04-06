@@ -407,7 +407,7 @@ def simplex_APGM(
                 "loss": value,
                 "nnz": average_nnz,
                 "time": time.time() - start_time,
-                "pssm": x,
+                "pssm": x if not logspace else jax.nn.softmax(x),
             }})
         
         if log_trajectory:
