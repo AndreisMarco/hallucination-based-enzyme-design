@@ -384,6 +384,7 @@ class Boltz2Loss(LossTerm):
     sampling_steps: int = 25
     name: str = "boltz2"
     initial_recycling_state: TrunkState | None = None
+    features_to_log: list[str] | None = None
 
     def __call__(self, sequence: Float[Array, "N 20"], key=None):
         """Compute the loss for a given sequence."""
@@ -407,6 +408,16 @@ class Boltz2Loss(LossTerm):
             key=key,
         )
 
+        # Include any additional specified features
+        if self.features_to_log is None:
+            feature_dict = {}
+        else: 
+            feature_dict = {k: features[k] for k in self.features_to_log if k in features.keys()}
+        
+        aux = {
+            "losses": aux,
+            "features": feature_dict
+        }
         return v, {self.name: aux}
 
 
@@ -531,10 +542,14 @@ class MultiSampleBoltz2Loss(LossTerm):
     name: str = "boltz2multi"
     initial_recycling_state: TrunkState | None = None
     reduction: any = jnp.mean
+    features_to_log: list[str] | None = None
     """
         Run the structure and confidence modules multiple times from the same trunk output.
         When `reduction` is jnp.mean this is equivalent to the expected loss over multiple samples *assuming a deterministic trunk*, but faster.
         This will consume quite a bit of memory -- if you'd like to sacrifice some speed for memory, replace the vmap below with a jax.lax.map.
+
+        Args:
+        - features_to_log: a list of str corresponding to elements of the features dictionary, to add to the aux from the loss function. 
     """
 
     def __call__(self, sequence: Float[Array, "N 20"], key=None):
@@ -578,4 +593,15 @@ class MultiSampleBoltz2Loss(LossTerm):
             jax.random.split(key, self.num_samples)
         )
 
-        return self.reduction(vs), jax.tree.map(lambda v: list(jnp.sort(v)), auxs)
+        # Include any additional specified features
+        if self.features_to_log is None:
+            feature_dict = {}
+        else: 
+            feature_dict = {k: features[k] for k in self.features_to_log if k in features.keys()}
+        
+        auxs = {
+            "losses": auxs,
+            "features": feature_dict
+        }
+
+        return self.reduction(vs),  {self.name: auxs}

@@ -76,15 +76,31 @@ sequences:"""
         features, writer = load_features_and_structure_writer(yaml)
         return (features, writer)
 
-    def build_loss(self, *, loss, features, recycling_steps=1, sampling_steps=None):
+    def build_loss(self, 
+                   *, 
+                   loss, 
+                   features, 
+                   recycling_steps=1, 
+                   sampling_steps=None,
+                   name: str = "boltz1", 
+                   features_to_log: list[str] | None = None
+                   ):
+        
+        if features_to_log is not None:
+            not_found = [f for f in features_to_log if f not in features.keys()]
+            if len(not_found) != 0: 
+                print(f"The following losses are not registered in the current model: {not_found}")
+
         return Boltz1Loss(
             joltz1=self.model,
             features=features,
             recycling_steps=recycling_steps
             - 1,  # Really awkward off-by-one issue in Joltz1 :/
+            name=name,
             sampling_steps=sampling_steps if sampling_steps is not None else 25,
             loss=loss,
             deterministic=True,
+            features_to_log=features_to_log
         )
 
     def model_output(

@@ -139,26 +139,62 @@ class Boltz2(StructurePredictionModel):
     def binder_features(binder_length, chains: list[TargetChain]):
         return binder_features(binder_length, chains)
 
-    def build_loss(self, *, loss, features, recycling_steps=1, sampling_steps=None):
+    def build_loss(
+            self, 
+            *, 
+            loss, 
+            features, 
+            recycling_steps=1,
+            sampling_steps=None,
+            name: str = "boltz2",
+            features_to_log: list[str] | None = None
+            ):
+        
+        if features_to_log is not None:
+            not_found = [f for f in features_to_log if f not in features.keys()]
+            if len(not_found) != 0: 
+                print(f"The following losses are not registered in the current model: {not_found}")
+
         return Boltz2Loss(
             joltz2=self.model,
             features=features,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps if sampling_steps is not None else 25,
+            name=name,
             loss=loss,
             deterministic=True,
+            features_to_log=features_to_log
         )
 
-    def build_multisample_loss(self, *, loss, features, recycling_steps=1, num_samples: int = 4, sampling_steps=None, reduction=jnp.mean):
+    def build_multisample_loss(
+            self,
+            *, 
+            loss, 
+            features, 
+            recycling_steps=1, 
+            num_samples: int = 4, 
+            sampling_steps=None, 
+            name: str = "boltz2", 
+            reduction=jnp.mean, 
+            features_to_log: list[str] | None = None
+            ):
+        
+        if features_to_log is not None:
+            not_found = [f for f in features_to_log if f not in features.keys()]
+            if len(not_found) != 0: 
+                print(f"The following losses are not registered in the current model: {not_found}")
+
         return MultiSampleBoltz2Loss(
             joltz2=self.model,
             features=features,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps if sampling_steps is not None else 25,
+            name=name,
             loss=loss,
             deterministic=True,
             num_samples=num_samples,
             reduction=reduction,
+            features_to_log=features_to_log
         )
 
 

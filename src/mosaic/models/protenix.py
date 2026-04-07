@@ -37,6 +37,7 @@ def load_model(name="protenix_mini_default_v0.5.0"):
 class Protenix(StructurePredictionModel):
     protenix: eqx.Module
     default_sample_steps: int
+    name: str
 
     def target_only_features(self, chains: list[TargetChain]):
         for c in chains:
@@ -69,15 +70,19 @@ class Protenix(StructurePredictionModel):
         features,
         recycling_steps=1,
         sampling_steps=None,
+        name: str | None = None,
         initial_recycling_state=None,
+        features_to_log: list[str] | None = None
     ):
         return self.build_multisample_loss(
             loss=loss,
             features=features,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
+            name=name if name is not None else self.name,
             num_samples=1,
             initial_recycling_state=initial_recycling_state,
+            features_to_log=features_to_log
         )
 
     def build_multisample_loss(
@@ -88,9 +93,16 @@ class Protenix(StructurePredictionModel):
         recycling_steps=1,
         num_samples: int = 4,
         sampling_steps=None,
+        name: str | None = None,
         reduction=jnp.mean,
         initial_recycling_state=None,
+        features_to_log: list[str] | None = None
     ):
+        if features_to_log is not None:
+            not_found = [f for f in features_to_log if f not in features.keys()]
+            if len(not_found) != 0: 
+                print(f"The following losses are not registered in the current model: {not_found}")
+        
         if sampling_steps is None:
             sampling_steps = self.default_sample_steps
         return MultiSampleProtenixLoss(
@@ -99,9 +111,11 @@ class Protenix(StructurePredictionModel):
             loss=loss,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
+            name=name if name is not None else self.name,
             num_samples=num_samples,
             reduction=reduction,
             initial_recycling_state=initial_recycling_state,
+            features_to_log=features_to_log
         )
 
     def model_output(
@@ -191,16 +205,16 @@ class Protenix(StructurePredictionModel):
 
 
 def ProtenixMini():
-    return Protenix(load_model(name="protenix_mini_default_v0.5.0"), 2)
+    return Protenix(load_model(name="protenix_mini_default_v0.5.0"), 2, name="ProtenixMini")
 
 
 def ProtenixTiny():
-    return Protenix(load_model(name="protenix_tiny_default_v0.5.0"), 2)
+    return Protenix(load_model(name="protenix_tiny_default_v0.5.0"), 2, name="ProtenixTiny")
 
 
 def ProtenixBase():
-    return Protenix(load_model(name="protenix_base_default_v1.0.0"), 20)
+    return Protenix(load_model(name="protenix_base_default_v1.0.0"), 20, name="ProtenixBase")
 
 
 def Protenix2025():
-    return Protenix(load_model(name="protenix_base_20250630_v1.0.0"), 20)
+    return Protenix(load_model(name="protenix_base_20250630_v1.0.0"), 20, name="Protenix2025")

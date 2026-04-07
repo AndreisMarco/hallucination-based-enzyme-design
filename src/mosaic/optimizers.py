@@ -2,34 +2,19 @@ import equinox as eqx
 import jax
 import numpy as np
 import jax.numpy as jnp
-from jaxtyping import Array, Float, Int, PyTree
+from jaxtyping import Array, Float, Int
 from typing import Callable
 from mosaic.common import is_state_update, has_state_index, LossTerm, LinearCombination
-
 import time
+from mosaic.losses.transformations import NoCys, SetPositions
+
+from mosaic.logger import TrajectoryLogger
+
 AbstractLoss = LossTerm | LinearCombination
 
-
-def _print_iter(iter, aux, v):
-    # first filter out anything that isn't a float or has number of dimensions > 0
-    aux = eqx.filter(
-        aux,
-        lambda v: isinstance(v, float | str) or v.shape == (),
-    )
-    print(
-        iter,
-        f"loss: {v:0.2f}",
-        " ".join(
-            f"{jax.tree_util.keystr(k, simple=True, separator='.')}:{v: 0.2f}"
-            for (k, v) in jax.tree_util.tree_leaves_with_path(aux)
-            if hasattr(v, "item")
-            or isinstance(v, float)
-            and (
-                "state_index" not in jax.tree_util.keystr(k, simple=True, separator=".")
-            )
-        ),
-    )
-
+# ============================================================================
+# Loss and gradient computation 
+# ============================================================================
 
 # Split this up so changing optim parameters doesn't trigger re-compilation of loss function
 def _eval_loss_and_grad(
@@ -75,45 +60,104 @@ def _eval_loss_and_grad(
     (v, aux), g = _____eval_loss_and_grad(loss_function, x=x, key=key)
     return (jnp.nan_to_num(v, nan = 1000000.0), aux), jnp.nan_to_num(g - g.mean(axis=-1, keepdims=True))
 
-
 # more underscores == more private
 @eqx.filter_jit
 def _____eval_loss_and_grad(loss, x, key):
     return eqx.filter_value_and_grad(loss, has_aux=True)(x, key=key)
 
-
 # this function is a mess, but it's used to update stateful loss functions. see comments in mosaic/common.py
 def update_states(aux, loss):
-    state_index_to_update = dict(
-        [
-            (int(x[0].id), x[1])
-            for x in jax.tree.leaves(aux, is_leaf=is_state_update)
-            if is_state_update(x)
-        ]
-    )
+    # Collect new_states and the id of their losses
+    state_index_to_update = [(x[0].id, x[1])
+                             for x in jax.tree.leaves(aux, is_leaf=is_state_update)
+                             if is_state_update(x)]
+    
+    # for multisample losses, as standard we only keep the first new generated state
+    state_index_to_update = {
+        (int(k.squeeze()) if isinstance(k, np.ndarray) else int(k)): 
+        (v[0] if isinstance(k, np.ndarray) else v)
+        for k, v in state_index_to_update
+        }
 
+    # get loss terms to update
     def get_modules_to_update(loss):
-        return tuple(
-            [
-                x
-                for x in jax.tree.leaves(loss, is_leaf=has_state_index)
-                if has_state_index(x)
-            ]
-        )
-
+        return tuple([x
+                      for x in jax.tree.leaves(loss, is_leaf=has_state_index)
+                      if has_state_index(x)])
+    # PyTree surgery to update states
     def replace_fn(module):
         return module.update_state(state_index_to_update[int(module.state_index.id)])
-
     return eqx.tree_at(get_modules_to_update, loss, replace_fn=replace_fn)
 
+# ============================================================================
+# Helper functions 
+# ============================================================================
 
-# def _proposal(sequence, g, temp, alphabet_size: int = 20):
-#     input = jax.nn.one_hot(sequence, alphabet_size)
-#     g_i_x_i = (g * input).sum(-1, keepdims=True)
-#     logits = -((input * g).sum() - g_i_x_i + g) / temp
-#     return jax.nn.softmax(logits), jax.nn.log_softmax(logits)
+def _print_iter(i, aux, minimal=True):
+    def is_scalar_float(x):
+        return isinstance(x, (float, jax.Array, np.ndarray)) and jnp.ndim(x) == 0
+    metrics = {}
+    for path, v in jax.tree_util.tree_leaves_with_path(aux):
+        parts = [str(p.key) for p in path if hasattr(p, "key")]
+        path_str = ".".join(parts) if parts else "value"
+        if minimal and ("optim" not in path_str):
+            continue
+        if not is_scalar_float(v):
+            continue
+        if "state_index" in path_str:
+            continue
+        metrics[path_str] = float(v)
+    print(i, " | ".join(f"{k:<5}: {v:>10.2f}" for k, v in metrics.items()))
 
-# rewrite in numpy to use float64
+def _is_model_aux(v):
+    if not isinstance(v, dict):
+        return False
+    keys = v.keys()
+    if len(keys) != 1:
+        return False
+    key = str(*keys)
+    if isinstance(v[key], dict) and ("losses" in v[key] and "features" in v[key]):
+        return True
+    return False
+
+OTHER_LOSSES_KEY = "other_losses"
+def standardize_aux(aux):
+    standardized = {}
+
+    if isinstance(aux, dict):
+        if _is_model_aux(aux):
+            return aux
+        else:
+            return {OTHER_LOSSES_KEY: aux}
+    
+    elif isinstance(aux, list):
+        for i in aux:
+            if _is_model_aux(i):
+                standardized.update(i)
+            elif OTHER_LOSSES_KEY not in standardized:
+                standardized[OTHER_LOSSES_KEY] = i
+            else:
+                standardized[OTHER_LOSSES_KEY].update(i)
+    else:
+        raise ValueError(f"Invalid aux format, must be either dict or list got {type(aux)} ")
+
+    return standardized
+
+def clean_pssm(PSSM, loss):       
+    '''
+    Unwraps loss transformations which modify the pssm returning a clean pssm 
+    '''                                                                
+    if isinstance(loss, NoCys):
+        PSSM = NoCys.sequence(PSSM)
+        loss = loss.loss                                
+    if isinstance(loss, SetPositions):
+        PSSM = loss.sequence(seq=PSSM)                                                            
+    return PSSM    
+
+# ============================================================================
+# Optimizers
+# ============================================================================
+
 from scipy.special import softmax, log_softmax 
 def _proposal(sequence, g, temp, alphabet_size: int = 20):
     input = np.eye(alphabet_size)[sequence]
@@ -134,6 +178,8 @@ def gradient_MCMC(
     detailed_balance: bool = False,
     fix_loss_key: bool = True,
     serial_evaluation: bool = False,
+    log_trajectory: bool = False,
+    on_step: Callable | None = None,
 ):
     """
     Implements the gradient-assisted MCMC sampler from "Plug & Play Directed Evolution of Proteins with
@@ -160,6 +206,10 @@ def gradient_MCMC(
     (v_0, aux_0), g_0 = _eval_loss_and_grad(
         loss, jax.nn.one_hot(sequence, alphabet_size), key=key_model, serial_evaluation=serial_evaluation
     )
+
+    if log_trajectory:
+        logger = TrajectoryLogger()
+
     for iter in range(steps):
         start_time = time.time()
         ### generate a proposal
@@ -228,22 +278,36 @@ def gradient_MCMC(
             sequence = proposal
             (v_0, aux_0), g_0 = (v_1, aux_1), g_1
         
-        _print_iter(iter, {"": aux_0, "time": time.time() - start_time}, v_0)
-        
+        # add optimization info to aux 
+        aux = standardize_aux(aux_0)
+        aux.update({"optim": {
+                "loss": v_0,
+                "time": time.time() - start_time,
+                "nnz": 1.0,
+                "pssm": clean_pssm(jax.nn.one_hot(sequence, alphabet_size), loss),
+            }})
+
+        if log_trajectory: 
+            logger.update(aux)
+
+        if on_step is not None:
+            on_step(iter, aux)
+
+        _print_iter(
+            iter,
+            aux,
+        )
 
         key = jax.random.fold_in(key, 0)
 
-    return sequence
+    if not log_trajectory:
+        return sequence 
+    else:
+        logger.clean_trajectory()
+        return sequence, logger
 
 
 def projection_simplex(V, z=1):
-    """
-    From https://gist.github.com/mblondel/c99e575a5207c76a99d714e8c6e08e89
-    Projection of x onto the simplex, scaled by z:
-        P(x; z) = argmin_{y >= 0, sum(y) = z} ||y - x||^2
-    z: float or array
-        If array, len(z) must be compatible with V
-    """
     V = np.array(V, dtype=np.float64)
     n_features = V.shape[1]
     U = np.sort(V, axis=1)[:, ::-1]
@@ -267,10 +331,11 @@ def simplex_APGM(
     max_gradient_norm: float | None = None,
     update_loss_state: bool = False,
     scale=1.0,
-    trajectory_fn: Callable[tuple[PyTree, Float[Array, "N 20"]], any] | None = None,
     logspace: bool = False,
     serial_evaluation: bool = False,
     sample_loss: bool = False,
+    log_trajectory: bool = False,
+    on_step: Callable | None = None,
 ):
     """
     Accelerated projected gradient descent on the simplex.
@@ -306,7 +371,8 @@ def simplex_APGM(
 
     x_prev = x
 
-    trajectory = []
+    if log_trajectory:
+        logger = TrajectoryLogger()
 
     for _iter in range(n_steps):
         start_time = time.time()
@@ -339,34 +405,41 @@ def simplex_APGM(
                 x  # this isn't exactly right, because we evaluated loss at v, not x.
             )
 
+        if update_loss_state:
+            loss_function = update_states(aux, loss_function)
+        
+        # add optimization info to aux 
+        aux = standardize_aux(aux)
         average_nnz = (
             (x > 0.01).sum(-1).mean()
             if not logspace
             else (jax.nn.softmax(x) > 0.01).sum(-1).mean()
         )
+        aux.update({"optim": {
+                "loss": value,
+                "nnz": average_nnz,
+                "time": time.time() - start_time,
+                "pssm": clean_pssm(x, loss_function) if not logspace \
+                        else clean_pssm(jax.nn.softmax(x), loss_function),
+            }})
+        
+        if log_trajectory:
+            logger.update(aux)
 
-        # add loss and NNZ to aux
-        if update_loss_state:
-            loss_function = update_states(aux, loss_function)
-
-        aux = {"loss": value, "nnz": average_nnz, "time": (time.time()-start_time), "": aux}
-        if trajectory_fn is not None:
-            trajectory.append(trajectory_fn(aux, x))
+        if on_step is not None:
+            on_step(_iter, aux)
 
         _print_iter(
             _iter,
-            eqx.filter(
-                aux,
-                lambda v: isinstance(v, float) or v.shape == (),
-            ),
-            value,
+            aux,
         )
 
     if logspace:
         x = jax.nn.softmax(x)
         best_x = jax.nn.softmax(best_x)
 
-    if trajectory_fn is None:
+    if not log_trajectory:
         return x, best_x
     else:
-        return x, best_x, trajectory
+        logger.clean_trajectory()
+        return x, best_x, logger

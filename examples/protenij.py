@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.19.9"
+__generated_with = "0.22.0"
 app = marimo.App()
 
 with app.setup:
@@ -23,7 +23,7 @@ with app.setup:
     import jax.numpy as jnp
     from protenix.protenij import TrunkEmbedding
     from mosaic.structure_prediction import TargetChain
-    from mosaic.models.protenix import ProtenixMini, Protenix2025, ProtenixBase
+    from mosaic.models.protenix import ProtenixMini, Protenix2025, ProtenixBase, ProtenixTiny
 
 
 @app.cell(hide_code=True)
@@ -61,7 +61,7 @@ def _(binder_length, protenix, target_sequence, target_structure):
         chains=[
             TargetChain(
                 target_sequence,
-                use_msa=True,
+                use_msa=False,
                 template_chain=target_structure[0][0],
             )
         ],
@@ -129,7 +129,7 @@ def _():
 
 @app.cell
 def _(binder_length, loss):
-    PSSM = jax.nn.softmax(
+    pssm_init = jax.nn.softmax(
         0.5
         * jax.random.gumbel(
             key=jax.random.key(np.random.randint(1000000)),
@@ -137,9 +137,9 @@ def _(binder_length, loss):
         )
     )
 
-    _, PSSM = simplex_APGM(
+    _, pssm_soft = simplex_APGM(
         loss_function=loss,
-        x=PSSM,
+        x=pssm_init,
         n_steps=100,
         stepsize=0.15 * np.sqrt(binder_length),
         momentum=0.3,
@@ -147,28 +147,23 @@ def _(binder_length, loss):
         update_loss_state=False,
         max_gradient_norm=1.0,
     )
-    return (PSSM,)
 
-
-@app.cell
-def _(PSSM, binder_length, loss):
-    PSSM_sharper, _ = simplex_APGM(
+    pssm_sharp, _ = simplex_APGM(
         loss_function=loss,
-        x=jnp.log(PSSM + 1e-5),
-        n_steps=20,
+        x=pssm_soft,
+        n_steps=25,
         stepsize=0.5 * np.sqrt(binder_length),
         momentum=0.0,
         scale=1.3,
         update_loss_state=False,
-        logspace=False,
         max_gradient_norm=1.0,
     )
-    return (PSSM_sharper,)
+    return (pssm_sharp,)
 
 
 @app.cell
-def _(PSSM_sharper):
-    plt.imshow(PSSM_sharper)
+def _(pssm_sharp):
+    plt.imshow(pssm_sharp)
     return
 
 
@@ -184,17 +179,33 @@ def _(protenix_pred):
     return
 
 
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    Repredict optimized binder with target
+    """)
+    return
+
+
 @app.cell
-def _(PSSM_sharper, design_features, design_structure, protenix):
+def _(design_features, design_structure, protenix, pssm_sharp):
     # repredict design with recycling
     protenix_pred = protenix.predict(
-        PSSM=PSSM_sharper,
+        PSSM=pssm_sharp,
         features=design_features,
         recycling_steps=4,
         key=jax.random.key(0),
         writer=design_structure,
     )
     return (protenix_pred,)
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    Visualize prediction infos and save structure
+    """)
+    return
 
 
 @app.cell

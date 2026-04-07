@@ -385,6 +385,54 @@ First, `simplex_APGM,` which is an accelerated proximal gradient algorithm on th
 
 We also include a discrete optimization algorithm, `gradient_MCMC`, which is a variant of MCMC with a proposal distribution defined using a taylor approximation to the objective function (see [Plug & Play Directed Evolution of Proteins with Gradient-based Discrete MCMC](https://arxiv.org/abs/2212.09925).) This algorithm is especially useful for finetuning either existing designs or the result of continuous optimization.
 
+#### Logging trajectories
+Setting `log_trajectory=True` when calling the optimizers, makes them return an additional `TrajectoryLogger` object, which provides access to intermediates PSSM and loss values. 
+
+```python
+# Run two phase optimization
+_, PSSM, logger1 = simplex_APGM(
+    loss_function=loss,
+    x=PSSM,
+    n_steps=50,
+    stepsize=0.15,
+    momentum=0.3,
+    log_trajectory=True,
+)
+
+seq_mcmc, logger2 = gradient_MCMC(
+    loss=af_loss,
+    sequence=jax.device_put(PSSM.argmax(-1)),
+    temp=0.001,
+    proposal_temp=0.00001,
+    steps=100,
+    fix_loss_key=False,
+    serial_evaluation=True
+    log_trajectory=True,
+)
+
+
+# Concatenate trajectories
+logger_full = logger1 + logger2
+
+# Access trajectory (PyTree)
+trajectory_full = logger.trajectory
+
+# Save trajectory
+logger.save("path/to/experiment")
+```
+This will create to the specified `log_path` containing:
+```
+log_path
+├── sequence.txt        # optimized sequence string
+├── trajectory.pkl      # pickled trajectory dictionary
+├── losses.png          # plot of the loss evolution (optional)
+└── pssm_evolution.mp4  # video of pssm evolution (optional)
+```
+Trajectories can be loaded with:
+```python
+from mosaic.logger import TrajectoryLogger
+logger_reloaded = TrajectoryLogger.load("path/to/experiment/trajectory.pkl")
+```
 
 #### Loss transformations
 
@@ -423,4 +471,3 @@ Typically $\ell$ is formed by a single neural network (or an ensemble of the sam
 This kind of modular implementation of loss terms is also useful with modern RL-based alignment of generative models approaches: these forms of alignment can often be seen as _amortized optimization_. Typically, they train a generative model to minimize some combination of KL divergence minus a loss function, which can be a combination of in-silico predictors. Another use case is to provide guidance to discrete diffusion or flow models. 
 
 [^1]: This requires us to treat neural networks as _simple parametric functions_ that can be combined programatically; **not** as complicated software packages that require large libraries (e.g. PyTorch lightning), bash scripts, or containers as is common practice in BioML. 
-
