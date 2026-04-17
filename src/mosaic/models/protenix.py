@@ -59,8 +59,14 @@ class Protenix(StructurePredictionModel):
 
         return features_dict, atom_array
     
-    def binder_features(self, binder_length, chains: list[TargetChain]):
-        binder = TargetChain(sequence="X" * binder_length, use_msa=False)
+    def binder_features(self, binder_length, chains: list[TargetChain], init_sequence: str | None=None):
+        if init_sequence is None:
+            sequence = "X" * binder_length
+        else: 
+            if binder_length != len(init_sequence):
+                raise ValueError(f"Specified init_sequence length ({len(init_sequence)}) does not match specified binder_length ({binder_length})")
+            sequence = init_sequence
+        binder = TargetChain(sequence=sequence, use_msa=False)
         return self.target_only_features([binder] + chains)
 
     def build_loss(

@@ -416,9 +416,16 @@ class AlphaFold2(StructurePredictionModel):
 
         return make_af_features(chains=chains), None
 
-    def binder_features(self, binder_length, chains: list[TargetChain]):
+    def binder_features(self, binder_length, chains: list[TargetChain],  init_sequence: str | None=None):
+        if init_sequence is None:
+            sequence = "G" * binder_length
+        else:
+            if binder_length != len(init_sequence):
+                raise ValueError(f"Specified init_sequence length ({len(init_sequence)}) does not match specified binder_length ({binder_length})")
+            sequence = init_sequence
+            
         features, _ = self.target_only_features(
-            [TargetChain(sequence="G" * binder_length, use_msa=False)] + chains
+            [TargetChain(sequence=sequence, use_msa=False)] + chains
         )
         return features, None
 
