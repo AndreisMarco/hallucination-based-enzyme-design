@@ -147,7 +147,7 @@ class TrajectoryLogger:
         
         return sliced
 
-    def clean_trajectory(self, keep_trajectory_list=True):
+    def clean_trajectory(self, keep_trajectory_list=False):
         if self.trajectory_list is None:
             raise RuntimeError(
                 "Logger does not have trajectory_list to be cleaned."
