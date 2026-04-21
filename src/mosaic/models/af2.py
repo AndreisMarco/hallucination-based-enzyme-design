@@ -422,7 +422,7 @@ class AlphaFold2(StructurePredictionModel):
         else:
             if binder_length != len(init_sequence):
                 raise ValueError(f"Specified init_sequence length ({len(init_sequence)}) does not match specified binder_length ({binder_length})")
-            sequence = init_sequence
+            sequence = init_sequence.replace("X", "G")
             
         features, _ = self.target_only_features(
             [TargetChain(sequence=sequence, use_msa=False)] + chains
