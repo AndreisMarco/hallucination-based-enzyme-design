@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
 import wandb
-from matplotlib.animation import FFMpegWriter
+from matplotlib.animation import PillowWriter
 
 from mosaic.common import TOKENS
 
@@ -54,10 +54,10 @@ def plot_pssm_heatmap(pssm, ax=None, return_wandb_image: bool = False):
         return wandb_image
     return fig
 
-def make_pssm_video(pssm_trajectory, output_path: str = "pssm_trajectory.mp4", fps: int = 10):
+def make_pssm_video(pssm_trajectory, output_path: str = "pssm_trajectory.gif", fps: int = 10):
     n_steps = pssm_trajectory.shape[0]
     fig, ax = plt.subplots(1, 1, figsize=(4, 12))
-    writer = FFMpegWriter(fps=fps)
+    writer = PillowWriter(fps=fps)
     with writer.saving(fig, output_path, dpi=100):
         for i in range(n_steps):
             plot_pssm_heatmap(pssm_trajectory[i], ax=ax)
@@ -222,7 +222,7 @@ class TrajectoryLogger:
         if save_pssm_video:
             make_pssm_video(
                 self.trajectory["optim"]["pssm"],
-                output_path=log_path / "pssm_evolution.mp4",
+                output_path=log_path / "pssm_evolution.gif",
             )
 
         print(f"Saved logs to: {log_path}")
