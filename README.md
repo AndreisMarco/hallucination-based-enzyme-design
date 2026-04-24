@@ -420,7 +420,7 @@ logger_full = logger1 + logger2
 trajectory_full = logger_full.trajectory
 
 # Save trajectory + pssm video + loss plot
-logger.save("path/to/experiment")
+logger_full.save("path/to/experiment")
 ```
 This will create to the specified `log_path` containing:
 ```
