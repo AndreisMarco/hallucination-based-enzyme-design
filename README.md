@@ -398,6 +398,8 @@ _, PSSM, logger1 = simplex_APGM(
     momentum=0.3,
     log_trajectory=True,
 )
+best_step = 
+logger1
 
 seq_mcmc, logger2 = gradient_MCMC(
     loss=af_loss,
@@ -414,10 +416,10 @@ seq_mcmc, logger2 = gradient_MCMC(
 # Concatenate trajectories
 logger_full = logger1 + logger2
 
-# Access trajectory (PyTree)
-trajectory_full = logger.trajectory
+# Extract just the trajectory (PyTree)
+trajectory_full = logger_full.trajectory
 
-# Save trajectory
+# Save trajectory + pssm video + loss plot
 logger.save("path/to/experiment")
 ```
 This will create to the specified `log_path` containing:
