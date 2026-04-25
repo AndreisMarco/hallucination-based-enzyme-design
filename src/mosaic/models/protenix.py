@@ -12,9 +12,9 @@ from protenix.data.template import ChainInput, featurize
 
 from mosaic.losses.protenix import (
     MultiSampleProtenixLoss,
-    ProtenixFromTrunkOutput,
     biotite_array_to_gemmi_struct,
     get_trunk_state,
+    protenix_forward_from_trunk,
     set_binder_sequence,
 )
 from mosaic.losses.structure_prediction import IPTMLoss
@@ -118,6 +118,7 @@ class Protenix(StructurePredictionModel):
             features_to_log=features_to_log
         )
 
+    @eqx.filter_jit
     def model_output(
         self,
         *,
@@ -140,40 +141,14 @@ class Protenix(StructurePredictionModel):
             key=key,
         )
 
-        return ProtenixFromTrunkOutput(
+        return protenix_forward_from_trunk(
             model=self.protenix,
             features=features,
-            sampling_steps=sampling_steps,
             initial_embedding=initial_embedding,
             trunk_state=trunk_state,
-            key=key,
-        )
-
-    @eqx.filter_jit
-    def _coords_and_confidences(
-        self,
-        *,
-        PSSM: None | Float[Array, "N 20"] = None,
-        features: PyTree,
-        recycling_steps=1,
-        sampling_steps=None,
-        initial_recycling_state=None,
-        key,
-    ):
-        if sampling_steps is None:
-            sampling_steps = self.default_sample_steps
-        output = self.model_output(
-            PSSM=PSSM,
-            features=features,
-            recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
-            initial_recycling_state=initial_recycling_state,
             key=key,
         )
-        if PSSM is None:
-            PSSM = jnp.zeros((0, 20))
-        iptm = -IPTMLoss()(PSSM, output, key=jax.random.key(0))[0]
-        return (output.structure_coordinates[0], output.pae, output.plddt, iptm)
 
     def predict(
         self,
@@ -186,9 +161,7 @@ class Protenix(StructurePredictionModel):
         initial_recycling_state=None,
         key,
     ):
-        if sampling_steps is None:
-            sampling_steps = self.default_sample_steps
-        (coords, pae, plddt, iptm) = self._coords_and_confidences(
+        output = self.model_output(
             PSSM=PSSM,
             features=features,
             recycling_steps=recycling_steps,
@@ -196,11 +169,14 @@ class Protenix(StructurePredictionModel):
             initial_recycling_state=initial_recycling_state,
             key=key,
         )
+        seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
+        iptm = -IPTMLoss()(seq, output, key=jax.random.key(0))[0]
         return StructurePrediction(
-            st=biotite_array_to_gemmi_struct(writer, np.array(coords)),
-            plddt=plddt,
-            pae=pae,
+            st=biotite_array_to_gemmi_struct(writer, np.array(output.structure_coordinates[0])),
+            plddt=output.plddt,
+            pae=output.pae,
             iptm=iptm,
+            model_output=output,
         )
 
 
@@ -218,3 +194,7 @@ def ProtenixBase():
 
 def Protenix2025():
     return Protenix(load_model(name="protenix_base_20250630_v1.0.0"), 20, name="Protenix2025")
+
+
+def ProtenixV2():
+    return Protenix(load_model(name="protenix-v2"), 20, name="ProtenixV2")

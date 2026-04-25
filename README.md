@@ -18,7 +18,7 @@ Protein design tasks almost always involve multiple constraints or properties th
 There has been a recent explosion in the application of machine learning to protein property prediction, resulting in fairly accurate predictors for each of these properties. What is currently lacking is an efficient and flexible method for combining these different predictors into one design/filtering/ranking framework. 
 
 ---
-### Models and losses
+### Models
 
 | Included models |
 | :--- |
@@ -27,7 +27,7 @@ There has been a recent explosion in the application of machine learning to prot
 | BoltzGen (design) |
 | AlphaFold2 |
 | OpenFold3 |
-| [Protenix (miny, tiny, base, v1.0, 20250630_v1.0.0)](#protenix) |
+| [Protenix (mini, tiny, base, v1.0, 20250630_v1.0.0, v2.0)](#protenix) |
 | [ProteinMPNN (standard, soluble, AbMPNN)](#proteinmpnn) |
 | [ESM (2 *or* C)](#esm) |
 | [stability](#stability) |
@@ -89,7 +89,7 @@ mono_features, _ = boltz1.binder_features(
 combined_loss = (
     boltz1.build_loss(
         loss=4 * sp.BinderTargetContact()
-        + sp.RadiusOfGyration(target_radius=15.0)
+        + sp.DistogramRadiusOfGyration(target_radius=15.0)
         + sp.WithinBinderContact()
         + 0.3 * sp.HelixLoss()
         + 5.0 * InverseFoldingSequenceRecovery(mpnn, temp=jax.numpy.array(0.01)),
@@ -102,7 +102,7 @@ combined_loss = (
     + 0.5
     * boltz1.build_loss(
         loss=0.2 * sp.PLDDTLoss()
-        + sp.RadiusOfGyration(target_radius=15.0)
+        + sp.DistogramRadiusOfGyration(target_radius=15.0)
         + 0.3 * sp.HelixLoss(),
         features=mono_features,
         recycling_steps=1,
@@ -192,7 +192,7 @@ For example, we can make a prediction with Protenix for IL7Ra like so:
 
 import jax
 from mosaic.structure_prediction import TargetChain
-from mosaic.models.protenix import ProtenixMini
+from mosaic.models.protenix import Protenix2025
 
 
 model = Protenix2025()
@@ -220,7 +220,7 @@ This interface is the same for all structure prediction models, so in theory we 
 We also define a collection of (model agnostic!) structure prediction related losses [here](src/mosaic/losses/structure_prediction.py). It's super easy to define your own using the provided interface.
 
 
-> Internally we distinguish between three classes of losses: those that rely only on the trunk, structure module, or confidence module. For computational efficiency we only run the structure module or confidence module if required.
+> In practice there are three types of structure prediction losses: those that rely on the trunk, structure module, or confidence module. Under JIT, JAX will prune code related to the structure module and confidence module if they're not needed; so if your loss only relies on the trunk it will be quite fast.
 
 
 Continuing the example above, we can construct a loss and do design as follows:
@@ -255,6 +255,33 @@ _, PSSM = simplex_APGM(
     stepsize=0.15,
     momentum=0.3,
 )
+```
+
+Each `StructurePrediction` object also contains  a `StructureModelOutput` in `model_output`. This can be useful for inspection, debugging loss terms, and chaining models. For example, to inverse fold directly from a prediction:
+
+```python
+import jax
+from mosaic.structure_prediction import TargetChain
+from mosaic.models.boltz2 import Boltz2
+from mosaic.proteinmpnn.mpnn import load_mpnn_sol
+from mosaic.losses.protein_mpnn import jacobi_inverse_fold
+from mosaic.common import TOKENS
+
+boltz2 = Boltz2()
+features, writer = boltz2.target_only_features([TargetChain(SEQUENCE, use_msa=True)])
+pred = boltz2.predict(
+    PSSM=jax.nn.one_hot([TOKENS.index(c) for c in SEQUENCE], 20),
+    features=features, writer=writer,
+    recycling_steps=3, sampling_steps=25, key=jax.random.key(0),
+)
+
+mpnn = load_mpnn_sol(0.05)
+ids = jacobi_inverse_fold(
+    mpnn=mpnn, binder_length=len(SEQUENCE),
+    output=pred.model_output, temp=0.001,
+    key=jax.random.key(0), jacobi_iterations=10,
+)
+print("".join(TOKENS[int(i)] for i in ids))
 ```
 
 > Every structure prediction model also supports a lower-level feature + losses interfaces if you'd like to do something fancy (e.g. design a protein binder against a small molecule with Boltz or Protenix).
@@ -388,7 +415,9 @@ We include some standard [optimizers](src/mosaic/optimizers.py).
 
 First, `simplex_APGM`, which is an accelerated proximal gradient algorithm on the probability simplex. One critical hyperparameter is the stepsize, a reasonable first guess is `0.1*np.sqrt(binder_length)`. Another useful keyword argument is `scale`, which corresponds to $\ell_2$ regularization. Values larger than `1.0` encourage sparse solutions; a typical binder design run might start with `scale=1.0` to get an initial, soft solution and then ramp up to something higher to get a discrete solution. 
 
-`simplex_APGM` also accepts a keyword argument, `logspace`, to run the algorithm in logspace, e.g. as an accelerated proximal bregman method. In this case `scale` corresponds to (negative) entropic regularization: values greater than one encourage sparsity.
+`simplex_APGM` also accepts a keyword argument, `logspace`, to run the algorithm in logspace, e.g. as an accelerated proximal bregman method. In this case `scale` corresponds to (negative) entropic regularization: values greater than one encourage sparsity. 
+
+`batched_simplex_APGM` is an internally-vmapped version of `simplex_APGM` -- useful if you've got a small target or large GPU (or both!), where it can increase throughput several fold.
 
 We also include a discrete optimization algorithm, `gradient_MCMC`, which is a variant of MCMC with a proposal distribution defined using a taylor approximation to the objective function (see [Plug & Play Directed Evolution of Proteins with Gradient-based Discrete MCMC](https://arxiv.org/abs/2212.09925).) This algorithm is especially useful for finetuning either existing designs or the result of continuous optimization.
 
@@ -440,6 +469,8 @@ Trajectories can be loaded with:
 from mosaic.logger import TrajectoryLogger
 logger_reloaded = TrajectoryLogger.load("path/to/experiment/trajectory.pkl")
 ```
+
+
 
 #### Loss transformations
 
