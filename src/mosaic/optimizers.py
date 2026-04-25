@@ -52,14 +52,14 @@ def _____eval_loss_and_grad(loss, x, key):
 # Helper functions 
 # ============================================================================
 
-def _print_iter(iter, aux, v):
+def _print_iter(_iter, aux, v):
     # first filter out anything that isn't a float or has number of dimensions > 0
     aux = eqx.filter(
         aux,
         lambda v: isinstance(v, float | str) or v.shape == (),
     )
     print(
-        iter,
+        _iter,
         f"loss: {v:0.2f}",
         " ".join(
             f"{jax.tree_util.keystr(k, simple=True, separator='.')}:{v: 0.2f}"
@@ -675,7 +675,7 @@ def batch_greedy_descent(
             logger.update(aux)
 
         if on_step is not None:
-            on_step(iter, aux)
+            on_step(_iter, aux)
 
         _print_iter(
             _iter,
