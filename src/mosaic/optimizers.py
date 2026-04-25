@@ -174,12 +174,15 @@ def gradient_MCMC(
     Args:
     - loss: log-probability/function to minimize
     - sequence: initial sequence
-    - proposal_temp: temperature of the proposal distribution
     - temp: temperature for the loss function
+    - proposal_temp: temperature of the proposal distribution
     - max_path_length: maximum number of mutations per step
     - steps: number of optimization steps
+    - alphabet_size: token alphabet size
     - key: jax random key
     - detailed_balance: whether to maintain detailed balance
+    - log_trajectory: whether to to return a logger object (output format : final, best, logger) containing the pssm and losses trajectory
+    - on_step: function to execute at every step, takes (_iter, aux) and returns any value.
 
     """
 
@@ -336,8 +339,9 @@ def simplex_APGM(
     - key: jax random key
     - max_gradient_norm: maximum norm of the gradient
     - scale: proximal scaling factor for L2 regularization (or entropic regularization if logspace=True), set to > 1.0 to encourage sparsity
-    - on_step: function to execute at every step, takes (aux, x) and returns any value.
     - logspace: whether to optimize in log space, which corresponds to a bregman proximal algorithm.
+    - log_trajectory: whether to to return a logger object (output format : final, best, logger) containing the pssm and losses trajectory
+    - on_step: function to execute at every step, takes (_iter, aux) and returns any value.
 
     returns:
     - x: final soft sequence after optimization
@@ -454,6 +458,8 @@ def batched_simplex_APGM(
     - max_gradient_norm: maximum norm of the gradient
     - scale: proximal scaling factor
     - logspace: whether to optimize in log space
+    - log_trajectory: whether to to return a logger objects (output format : final, best, loggers) containing the pssm and losses trajectory
+    - on_step: function to execute at every step, takes (_iter, batch_idx, aux) and returns any value.
 
     returns:
     - x: final soft sequences [B, N, 20]
@@ -603,6 +609,8 @@ def batch_greedy_descent(
     - steps: maximum number of steps
     - alphabet_size: token alphabet size
     - key: jax random key (fixed across all evals for deterministic comparison)
+    - log_trajectory: whether to to return a logger object (output format : final, best, logger) containing the pssm and losses trajectory
+    - on_step: function to execute at every step, takes (_iter, aux) and returns any value.
 
     Returns:
     - best_seq: best sequence found
