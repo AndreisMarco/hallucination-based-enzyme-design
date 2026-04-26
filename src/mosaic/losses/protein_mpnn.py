@@ -232,7 +232,7 @@ class ProteinMPNNLoss(LossTerm):
 
 # TODO: implement autoregressive sampling
 # for now though the jacobi method converges quickly enough
-def jacobi_inverse_fold(
+def inverse_fold(
     mpnn: ProteinMPNN,
     binder_length: int,
     output: StructureModelOutput,
@@ -294,11 +294,15 @@ def jacobi_inverse_fold(
         return logits[:binder_length] @ boltz_to_mpnn_matrix().T
 
     sequence = jax.random.randint(key = key, minval=0, maxval=20, shape=binder_length)
-    for _ in range(jacobi_iterations):
-        logits = seq_to_logits(sequence) 
+
+    def step(sequence, _):
+        logits = seq_to_logits(sequence)
         if bias is not None:
             logits += bias
         sequence = (logits + temp * gumbel).argmax(-1)
+        return sequence, None
+
+    sequence, _ = jax.lax.scan(step, sequence, length=jacobi_iterations)
 
     return sequence
 
@@ -330,7 +334,7 @@ class InverseFoldingSequenceRecovery(LossTerm):
     ):
         sequences = jax.vmap(
             lambda k: jax.nn.one_hot(
-                jacobi_inverse_fold(
+                inverse_fold(
                     self.mpnn,
                     binder_length=sequence.shape[0],
                     output=output,
