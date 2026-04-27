@@ -326,6 +326,7 @@ def simplex_APGM(
     logspace: bool = False,
     log_trajectory: bool = False,
     on_step: Callable | None = None,
+    trajectory_fn: Callable[tuple[PyTree, Float[Array, "N 20"]], any] | None = None,
 ):
     """
     Accelerated projected gradient descent on the simplex.
@@ -344,10 +345,12 @@ def simplex_APGM(
     - on_step: function to execute at every step, takes (_iter, aux) and returns any value.
 
     returns:
-    - x: final soft sequence after optimization
-    - best_x: best soft sequence found during optimization
-    - trajectory: list of trajectory information if `trajectory_fn` is provided, otherwise nothing.
+    - (x, best_x) when neither log_trajectory nor trajectory_fn is set.
+    - (x, best_x, logger) when log_trajectory is True.
+    - (x, best_x, trajectory) when trajectory_fn is set (and log_trajectory is False).
     """
+    assert not (log_trajectory and trajectory_fn is not None), \
+        "log_trajectory and trajectory_fn are mutually exclusive; pick one"
 
     if max_gradient_norm is None:
         max_gradient_norm = np.sqrt(x.shape[0])
@@ -363,6 +366,7 @@ def simplex_APGM(
 
     if log_trajectory:
         logger = TrajectoryLogger()
+    trajectory = []
 
     for _iter in range(n_steps):
         start_time = time.time()
@@ -424,12 +428,13 @@ def simplex_APGM(
         x = jax.nn.softmax(x)
         best_x = jax.nn.softmax(best_x)
 
-    if not log_trajectory:
-        return x, best_x
-    else:
+    if log_trajectory:
         logger.clean_trajectory()
         return x, best_x, logger
-    
+
+    return x, best_x
+
+
 def batched_simplex_APGM(
     *,
     loss_function: AbstractLoss,
@@ -583,6 +588,7 @@ def _topb_unseen_mutations(seq, g, seen, b):
         return None
     return np.stack(cands), np.asarray(deltas)
 
+
 def batch_greedy_descent(
     loss: AbstractLoss,
     sequence: Int[Array, "N"],
@@ -631,7 +637,7 @@ def batch_greedy_descent(
     aux = jax.tree.map(lambda a: a[0], aux0)
     aux = standardize_aux(aux)
     
-    _print_iter("init", {"": aux}, v)
+    _print_iter("init", aux, v)
 
     best_seq = sequence.copy()
     best_val = v
