@@ -7,7 +7,6 @@ from jaxtyping import Float, Array
 from mosaic.common import LossTerm, restype_three_to_one, TOKENS
 from mosaic.structure_prediction import AbstractStructureOutput
 from mosaic.util import kabsch, gram_schmidt
-
     
 import biotite.structure as struct
 from biotite.structure.io import pdb, pdbx
@@ -43,7 +42,7 @@ class Scaffold():
                         f"Interval start must be smaller or equal to end, got start:{interval[0]} end:{interval[1]}"
                     )
             
-            # Check for overlapping intervals
+            # check for overlapping intervals
             sorted_intervals = sorted(intervals)
             for i in range(len(sorted_intervals) - 1):
                 if sorted_intervals[i][1] >= sorted_intervals[i+1][0]:
@@ -52,34 +51,44 @@ class Scaffold():
                     )
             return intervals
 
-        def extract_fragment(start, end):
+        def extract_fragment(structure, start, end):
+            # extract specified residues
             frag = structure[(structure.res_id >= start) & (structure.res_id <= end)]
-
-            bb_mask  = np.isin(frag.atom_name, ["N", "CA", "C", "O"])
+            # extract backbone atom coordinates
+            bb_mask  = np.isin(frag.atom_name, list(bb_atom_order.keys()))
             bb_atoms = frag[bb_mask]
             sort_key = np.array([bb_atom_order.get(n, 99) for n in bb_atoms.atom_name])
             sort_idx = np.lexsort((sort_key, bb_atoms.res_id))
             bb_coords = bb_atoms.coord[sort_idx].reshape(-1, 4, 3)
-
+            # extract c-alphas atom coordinates
             ca_mask  = frag.atom_name == "CA"
             ca_atoms = frag[ca_mask]
             ca_coords = ca_atoms.coord
-            sequence  = "".join(
-                restype_three_to_one.get(name, "X") for name in ca_atoms.res_name
-            )
-
-            return bb_coords, ca_coords, sequence
+            pb_coords = np.zeros((len(ca_atoms), 3), dtype=np.float32)
+            # extract pseudo-beta atom coordinates
+            for i, (rid, res_name, ca_xyz) in enumerate(
+                zip(ca_atoms.res_id, ca_atoms.res_name, ca_atoms.coord)
+            ):
+                if res_name == "GLY":
+                    pb_coords[i] = ca_xyz
+                else:
+                    cb = frag[(frag.res_id == rid) & (frag.atom_name == "CB")]
+                    pb_coords[i] = cb.coord[0] if len(cb) > 0 else ca_xyz
+            # built fragment sequence
+            sequence  = "".join(restype_three_to_one.get(name, "X") for name in ca_atoms.res_name)
+            return bb_coords, ca_coords, pb_coords, sequence
 
         def make_loop(n):
             bb  = np.zeros((n, 4, 3), dtype=np.float32)
             ca  = np.zeros((n, 3),    dtype=np.float32)
+            pb  = np.zeros((n, 3),    dtype=np.float32)
             seq = "X" * n
-            return bb, ca, seq
+            return bb, ca, pb, seq
 
-        # Convert string of intervals to list[tuple[int]]
+        # convert string of intervals to list[tuple[int]]
         keep_intervals = str_to_intervals(keep_intervals)
 
-        # Check intervals/loops/order consistency
+        # check intervals/loops/order consistency
         assert len(loops) == len(order) + 1, \
             f"loops must have length len(order)+1={len(order)+1}, got {len(loops)}"
 
@@ -87,7 +96,7 @@ class Scaffold():
             f"order must include an idx for each element of keep_intervals " \
             f"starting from 0 to len(keep_intervals)-1={len(keep_intervals)-1}"
 
-        # Load and filter to amino acids
+        # load and filter to amino acids
         if path_to_structure.endswith(".pdb"):
             pdb_file = pdb.PDBFile.read(path_to_structure)
             structure = pdb.get_structure(pdb_file, model=1)
@@ -100,41 +109,52 @@ class Scaffold():
         structure = structure[struct.filter_amino_acids(structure)]
         bb_atom_order = {"N": 0, "CA": 1, "C": 2, "O": 3}
 
-        # Assemble dummy sequence
-        all_bb, all_ca, all_seq, all_mask = [], [], [], []
-
+        # assemble dummy sequence
+        all_bb, all_ca, all_pb, all_seq, all_mask = [], [], [], [], []
         for i, frag_idx in enumerate(order):
+            # create loop start/middle loop
             if loops[i] > 0:
-                bb, ca, seq = make_loop(loops[i])
-                all_bb.append(bb);   all_ca.append(ca)
-                all_seq.append(seq); all_mask.append(np.zeros(loops[i], dtype=bool))
-
+                bb, ca, pb, seq = make_loop(loops[i])
+                all_bb.append(bb)
+                all_ca.append(ca)
+                all_pb.append(pb)
+                all_seq.append(seq)
+                all_mask.append(np.zeros(loops[i], dtype=bool))
+            # create keep intervals
             start, end = keep_intervals[frag_idx]
-            bb, ca, seq = extract_fragment(start, end)
+            bb, ca, pb, seq = extract_fragment(structure, start, end)
             L = ca.shape[0]
-            all_bb.append(bb);   all_ca.append(ca)
-            all_seq.append(seq); all_mask.append(np.ones(L, dtype=bool))
-
+            all_bb.append(bb)
+            all_ca.append(ca)
+            all_pb.append(pb)
+            all_seq.append(seq)
+            all_mask.append(np.ones(L, dtype=bool))
+        # create last loop
         if loops[-1] > 0:
-            bb, ca, seq = make_loop(loops[-1])
-            all_bb.append(bb);   all_ca.append(ca)
-            all_seq.append(seq); all_mask.append(np.zeros(loops[-1], dtype=bool))
+            bb, ca, pb, seq = make_loop(loops[-1])
+            all_bb.append(bb)
+            all_ca.append(ca)
+            all_pb.append(pb)
+            all_seq.append(seq)
+            all_mask.append(np.zeros(loops[-1], dtype=bool))
 
-        # Store coords and others
+        # store coords and others
         bb_coords = np.concatenate(all_bb,   axis=0)  # [L_total, 4, 3]
         ca_coords = np.concatenate(all_ca,   axis=0)  # [L_total, 3]
+        pb_coords = np.concatenate(all_pb,   axis=0)  # [L_total, 3]
         valid     = np.concatenate(all_mask, axis=0)  # [L_total]
 
         self.sequence = "".join(all_seq)
         self.mask = jnp.array(valid)                # [L_total] bool
         self._bb_coords = jnp.array(bb_coords)      # [L_total, 4, 3]
         self._ca_coords = jnp.array(ca_coords)      # [L_total, 3]
+        self._pb_coords = jnp.array(pb_coords)      # [L_total, 3]
 
     def __len__(self) -> int:
         return len(self.sequence)
 
     def distogram(self) -> jnp.ndarray:
-        diff = self._ca_coords[:, None, :] - self._ca_coords[None, :, :]
+        diff = self._pb_coords[:, None, :] - self._pb_coords[None, :, :]
         dist = jnp.linalg.norm(diff, axis=-1)
         pair_mask = self.mask[:, None] & self.mask[None, :]
         return jnp.where(pair_mask, dist, 0.0)
@@ -183,16 +203,16 @@ class DistogramCCE(LossTerm):
         output: AbstractStructureOutput,
         key,
     ):
-        # Only keep scaffold positions
-        pred_logits  = output.distogram_logits[self._idx][:, self._idx]  
-        gt_distogram = self.gt_distogram[self._idx][:, self._idx]        
-        bins = output.distogram_bins
-        # Turn ground-truth to one-hot
-        gt_indices = jnp.digitize(gt_distogram, bins)
-        gt_indices = jnp.clip(gt_indices, 0, pred_logits.shape[-1] - 1)
-        gt_one_hot = nn.one_hot(gt_indices, num_classes=pred_logits.shape[-1])
+        # create gt distogram for scaffolded positions
+        pred_logits  = output.distogram_logits[self._idx][:, self._idx]
+        gt_distogram = self.gt_distogram[self._idx][:, self._idx]
+        num_bins   = pred_logits.shape[-1]
+        # adapt bins to the values specified by the model
+        bin_edges  = jnp.linspace(output.distogram_bins[0], output.distogram_bins[-1], num_bins - 1)
+        gt_indices = (gt_distogram[..., None] > bin_edges).sum(-1)
+        gt_one_hot = nn.one_hot(gt_indices, num_classes=num_bins)
         
-        # Compute CCE
+        # compute CCE
         loss = -jnp.sum(gt_one_hot * nn.log_softmax(pred_logits, axis=-1), axis=-1)
         dgramm_cce = jnp.mean(loss)
         return dgramm_cce, {"dgramm_cce": dgramm_cce}
@@ -226,12 +246,12 @@ class FAPE(LossTerm):
         def get_ij(R, t):
             return jnp.einsum("rji, rsj -> rsi", R, t[None, :] - t[:, None])
 
-        # Only keep scaffold positions
+        # only keep scaffold positions
         pred_bb = output.backbone_coordinates[self._idx] 
         gt_R    = self.gt_R[self._idx]                    
         gt_t    = self.gt_t[self._idx]                    
 
-        # Compute rotation on prediction backbones
+        # compute rotation on prediction backbones
         pred_R = gram_schmidt(
             v1=pred_bb[:, 2, :] - pred_bb[:, 1, :],   # CA -> C
             v2=pred_bb[:, 0, :] - pred_bb[:, 1, :],   # CA -> N
@@ -240,7 +260,7 @@ class FAPE(LossTerm):
         pred_ij = get_ij(pred_R, pred_t)
         gt_ij = get_ij(gt_R, gt_t)
 
-        # Compute FAPE
+        # compute FAPE
         fape = robust_norm(pred_ij - gt_ij)
         fape = jnp.clip(fape, 0.0, 10.0) / 10.0
         fape = fape.mean()
@@ -267,15 +287,15 @@ class RMSD(LossTerm):
         output: AbstractStructureOutput,
         key,
     ):
-        # Only keep scaffold positions
+        # only keep scaffold positions
         pred_bb = output.backbone_coordinates[self._idx] 
         gt_bb = self.gt_coords[self._idx]               
-        # Align pred to gt
+        # align pred to gt
         pred = pred_bb.reshape(-1, 3)
         gt = gt_bb.reshape(-1, 3)
         R, t = kabsch(pred, gt)
         pred_aligned = pred @ R + t
-        # Compute RMSD
+        # compute RMSD
         rmsd = jnp.sqrt(jnp.mean(jnp.sum((pred_aligned - gt) ** 2, axis=-1)))
         return rmsd, {"scaffold_rmsd": rmsd}
 
