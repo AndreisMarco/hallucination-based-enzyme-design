@@ -422,11 +422,12 @@ First, `simplex_APGM`, which is an accelerated proximal gradient algorithm on th
 We also include a discrete optimization algorithm, `gradient_MCMC`, which is a variant of MCMC with a proposal distribution defined using a taylor approximation to the objective function (see [Plug & Play Directed Evolution of Proteins with Gradient-based Discrete MCMC](https://arxiv.org/abs/2212.09925).) This algorithm is especially useful for finetuning either existing designs or the result of continuous optimization.
 
 #### Logging trajectories
-Setting `log_trajectory=True` when calling the optimizers, makes them return an additional `TrajectoryLogger` object, which provides access to intermediates PSSM and loss values. 
+Setting `log_trajectory=True` when calling the optimizers, makes them return an additional `TrajectoryLogger` object, which provides access to intermediates PSSM and loss values.
+For `batched_simplex_APGM` a list of `TrajectoryLogger` objects is returned. 
 
 ```python
 # Run two phase optimization
-_, PSSM, logger1 = simplex_APGM(
+final_PSSM, best_PSSM, logger1 = simplex_APGM(
     loss_function=loss,
     x=PSSM,
     n_steps=50,
@@ -434,6 +435,10 @@ _, PSSM, logger1 = simplex_APGM(
     momentum=0.3,
     log_trajectory=True,
 )
+# If the second phase starts from the best_PSSM and not the final_PSSM,
+# slicing the trajectory can be done as follow:
+best_step = int(np.argmin(logger1.trajectory["optim"]["loss"]))                                                                                                                                               
+logger1 = logger1[:best_step + 1]
 
 seq_mcmc, logger2 = gradient_MCMC(
     loss=af_loss,
@@ -450,11 +455,11 @@ seq_mcmc, logger2 = gradient_MCMC(
 # Concatenate trajectories
 logger_full = logger1 + logger2
 
-# Access trajectory (PyTree)
-trajectory_full = logger.trajectory
+# Extract just the trajectory (PyTree)
+trajectory_full = logger_full.trajectory
 
-# Save trajectory
-logger.save("path/to/experiment")
+# Save trajectory + pssm video + loss plot
+logger_full.save("path/to/experiment")
 ```
 This will create to the specified `log_path` containing:
 ```
@@ -462,7 +467,7 @@ log_path
 ├── sequence.txt        # optimized sequence string
 ├── trajectory.pkl      # pickled trajectory dictionary
 ├── losses.png          # plot of the loss evolution (optional)
-└── pssm_evolution.mp4  # video of pssm evolution (optional)
+└── pssm_evolution.git  # video of pssm evolution (optional)
 ```
 Trajectories can be loaded with:
 ```python
