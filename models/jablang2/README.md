@@ -1,3 +1,3 @@
 
-Barebones translation of [AbLang](https://github.com/oxpig/AbLang) to JAX.
+Barebones translation of [AbLang2](https://github.com/oxpig/AbLang2) to JAX.
 
