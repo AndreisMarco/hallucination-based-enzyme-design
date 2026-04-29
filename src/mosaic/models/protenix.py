@@ -26,8 +26,8 @@ from mosaic.structure_prediction import (
 )
 
 
-def load_model(name="protenix_mini_default_v0.5.0"):
-    jax_model = backend_load_model(name)
+def load_model(name="protenix_mini_default_v0.5.0", bf16=False):
+    jax_model = backend_load_model(name, bf16=bf16)
     # set gamma0, step_scale_eta, and N_steps to match the vanilla ODE sampler settings
     jax_model = eqx.tree_at(lambda m: (m.gamma0, m.step_scale_eta, m.noise_scale_lambda, m.N_steps), jax_model, (0.0, 1.0, 1.0, 20))
 
@@ -180,21 +180,20 @@ class Protenix(StructurePredictionModel):
         )
 
 
-def ProtenixMini():
-    return Protenix(load_model(name="protenix_mini_default_v0.5.0"), 2, name="ProtenixMini")
+def ProtenixMini(bf16=False):
+    return Protenix(load_model(name="protenix_mini_default_v0.5.0", bf16=bf16), 2, name="ProtenixMini")
 
 
-def ProtenixTiny():
-    return Protenix(load_model(name="protenix_tiny_default_v0.5.0"), 2, name="ProtenixTiny")
+def ProtenixTiny(bf16=False):
+    return Protenix(load_model(name="protenix_tiny_default_v0.5.0", bf16=bf16), 2, name="ProtenixTiny")
 
 
-def ProtenixBase():
-    return Protenix(load_model(name="protenix_base_default_v1.0.0"), 20, name="ProtenixBase")
+def ProtenixBase(bf16=False):
+    return Protenix(load_model(name="protenix_base_default_v1.0.0", bf16=bf16), 20, name="ProtenixBase")
 
 
-def Protenix2025():
-    return Protenix(load_model(name="protenix_base_20250630_v1.0.0"), 20, name="Protenix2025")
+def Protenix2025(bf16=False):
+    return Protenix(load_model(name="protenix_base_20250630_v1.0.0", bf16=bf16), 20, name="Protenix2025")
 
-
-def ProtenixV2():
-    return Protenix(load_model(name="protenix-v2"), 20, name="ProtenixV2")
+def ProtenixV2(bf16=False):
+    return Protenix(load_model(name="protenix-v2", bf16=bf16), 20, name="ProtenixV2")

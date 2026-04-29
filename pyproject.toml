@@ -37,6 +37,8 @@ dependencies = [
     "jproteina-complexa",
     "boltz",
     "boltzgen",
+    "jablang2",
+    "jsapiens",
 ]
 
 [dependency-groups]
@@ -69,13 +71,22 @@ torch = { index = "pytorch" }
 torchvision = { index = "pytorch" }
 joltz = { git = "https://github.com/nboyd/joltz" }
 esmj = { git = "https://github.com/escalante-bio/esmj" }
-protenix = { git = "https://github.com/escalante-bio/protenij"}
 jablang = { git = "https://github.com/escalante-bio/jablang" }
 joltzgen = { git = "https://github.com/escalante-bio/joltzgen.git" }
 jopenfold3 = { git = "https://github.com/escalante-bio/jopenfold3.git" }
 jproteina-complexa = { git = "https://github.com/escalante-bio/jproteina-complexa.git" }
 boltz = { git = "https://github.com/escalante-bio/boltz.git" }
 boltzgen = { git = "https://github.com/escalante-bio/boltzgen.git" }
+protenix = { workspace = true, editable = true }
+jablang2 = { workspace = true, editable = true }
+jsapiens = { workspace = true, editable = true }
+
+[tool.uv.workspace]
+members = [
+    "models/jablang2",
+    "models/jsapiens",
+    "models/protenij",
+]
 
 [tool.uv]
 required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]

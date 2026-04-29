@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Marimo notebook cache
+__marimo__/
