@@ -12,10 +12,15 @@ wheels/
 # Marimo notebook cache
 __marimo__/
 
-# testing
+# Do not upload uv.lock, you might have installed project specific
+# packages in your uv, keep pyproject.toml as reference 
+uv.lock
+
+# Other specified by upstream 
+.envrc
+
+# project specific specific
 jax_compilation_cache/
 testing/
-
-# personal changes
 .syncignore
-uv.lock
+

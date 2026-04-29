@@ -42,6 +42,11 @@ dependencies = [
 ]
 
 [dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "ruff>=0.15.12",
+    "ty>=0.0.33",
+]
 jax-cpu = [
   "jax[cpu]",
 ]
@@ -87,6 +92,10 @@ members = [
     "models/jsapiens",
     "models/protenij",
 ]
+
+[tool.pytest.ini_options]
+markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
+addopts = "-m 'not slow'"
 
 [tool.uv]
 required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
