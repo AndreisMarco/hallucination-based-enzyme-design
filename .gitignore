@@ -11,3 +11,11 @@ wheels/
 
 # Marimo notebook cache
 __marimo__/
+
+# testing
+jax_compilation_cache/
+testing/
+
+# personal changes
+.syncignore
+uv.lock
