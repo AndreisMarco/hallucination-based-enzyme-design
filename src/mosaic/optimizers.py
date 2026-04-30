@@ -326,7 +326,6 @@ def simplex_APGM(
     logspace: bool = False,
     log_trajectory: bool = False,
     on_step: Callable | None = None,
-    trajectory_fn: Callable[tuple[PyTree, Float[Array, "N 20"]], any] | None = None,
 ):
     """
     Accelerated projected gradient descent on the simplex.
@@ -345,12 +344,11 @@ def simplex_APGM(
     - on_step: function to execute at every step, takes (_iter, aux) and returns any value.
 
     returns:
-    - (x, best_x) when neither log_trajectory nor trajectory_fn is set.
-    - (x, best_x, logger) when log_trajectory is True.
-    - (x, best_x, trajectory) when trajectory_fn is set (and log_trajectory is False).
+    - x: final soft sequence after optimization
+    - best_x: best soft sequence found during optimization
+    - logger: if log_trajectory=True, TrajectoryLogger object containing a concatenation of the elements of aux along the optimization
+              (losses, pssm, eventual feature_to_log is specified in the log function).
     """
-    assert not (log_trajectory and trajectory_fn is not None), \
-        "log_trajectory and trajectory_fn are mutually exclusive; pick one"
 
     if max_gradient_norm is None:
         max_gradient_norm = np.sqrt(x.shape[0])
@@ -366,7 +364,6 @@ def simplex_APGM(
 
     if log_trajectory:
         logger = TrajectoryLogger()
-    trajectory = []
 
     for _iter in range(n_steps):
         start_time = time.time()
@@ -469,6 +466,7 @@ def batched_simplex_APGM(
     returns:
     - x: final soft sequences [B, N, 20]
     - best_x: best soft sequences found during optimization [B, N, 20]
+    - loggers: list of TrajectoryLogger objects (see simplex_APGM).
     """
     assert x.ndim == 3, f"x must be 3D [B, N, 20], got {x.ndim}D"
     B = x.shape[0]
@@ -621,6 +619,8 @@ def batch_greedy_descent(
     Returns:
     - best_seq: best sequence found
     - best_val: loss at best sequence
+    - logger: if log_trajectory=True, TrajectoryLogger object containing a concatenation of the elements of aux along the optimization
+              (losses, pssm, eventual feature_to_log is specified in the log function).
     """
     sequence = np.asarray(sequence, dtype=np.int32).copy()
     assert sequence.ndim == 1, f"sequence must be 1D [N], got {sequence.ndim}D"
