@@ -2,7 +2,7 @@ import equinox as eqx
 import jax
 import numpy as np
 import jax.numpy as jnp
-from jaxtyping import Array, Float, Int
+from jaxtyping import Array, Float, Int, PyTree
 from typing import Callable
 from mosaic.common import is_state_update, has_state_index, LossTerm, LinearCombination
 import time
@@ -64,6 +64,25 @@ def _eval_loss_and_grad(
 @eqx.filter_jit
 def _____eval_loss_and_grad(loss, x, key):
     return eqx.filter_value_and_grad(loss, has_aux=True)(x, key=key)
+
+
+@eqx.filter_jit
+def batched_eval(
+    loss: AbstractLoss,
+    xs: Float[Array, "B N K"],
+    keys: jax.Array,
+) -> tuple[Float[Array, "B"], PyTree, Float[Array, "B N K"]]:
+    """Evaluate loss+grad for B sequences with B keys."""
+    assert xs.ndim == 3, f"xs must be 3D [B, N, K], got {xs.ndim}D"
+
+    def single(x: Float[Array, "N K"], key: jax.Array):
+        (v, aux), g = eqx.filter_value_and_grad(loss, has_aux=True)(x, key=key)
+        v = jnp.nan_to_num(v, nan=1e6)
+        g = jnp.nan_to_num(g - g.mean(axis=-1, keepdims=True))
+        return v, aux, g
+
+    return jax.vmap(single)(xs, keys)
+
 
 # this function is a mess, but it's used to update stateful loss functions. see comments in mosaic/common.py
 def update_states(aux, loss):
@@ -336,6 +355,7 @@ def simplex_APGM(
     sample_loss: bool = False,
     log_trajectory: bool = False,
     on_step: Callable | None = None,
+    trajectory_fn: Callable[tuple[PyTree, Float[Array, "N 20"]], any] | None = None,
 ):
     """
     Accelerated projected gradient descent on the simplex.
@@ -350,14 +370,18 @@ def simplex_APGM(
     - max_gradient_norm: maximum norm of the gradient
     - update_loss_state: whether to update the loss function state
     - scale: proximal scaling factor for L2 regularization (or entropic regularization if logspace=True), set to > 1.0 to encourage sparsity
-    - trajectory_fn: function to compute trajectory information, takes (aux, x) and returns any value.
     - logspace: whether to optimize in log space, which corresponds to a bregman proximal algorithm.
+    - log_trajectory: if True, record the optimization trajectory via the local TrajectoryLogger.
+    - on_step: optional callback invoked as on_step(iter, aux) each step.
+    - trajectory_fn: optional function (aux, x) -> any; if set, its return value is appended to a trajectory list each step. Independent of log_trajectory.
 
     returns:
-    - x: final soft sequence after optimization
-    - best_x: best soft sequence found during optimization
-    - trajectory: list of trajectory information if `trajectory_fn` is provided, otherwise nothing.
+    - (x, best_x) when neither log_trajectory nor trajectory_fn is set.
+    - (x, best_x, logger) when log_trajectory is True.
+    - (x, best_x, trajectory) when trajectory_fn is set (and log_trajectory is False).
     """
+    assert not (log_trajectory and trajectory_fn is not None), \
+        "log_trajectory and trajectory_fn are mutually exclusive; pick one"
 
     if max_gradient_norm is None:
         max_gradient_norm = np.sqrt(x.shape[0])
@@ -373,6 +397,7 @@ def simplex_APGM(
 
     if log_trajectory:
         logger = TrajectoryLogger()
+    trajectory = []
 
     for _iter in range(n_steps):
         start_time = time.time()
@@ -426,6 +451,9 @@ def simplex_APGM(
         if log_trajectory:
             logger.update(aux)
 
+        if trajectory_fn is not None:
+            trajectory.append(trajectory_fn(aux, x))
+
         if on_step is not None:
             on_step(_iter, aux)
 
@@ -438,8 +466,226 @@ def simplex_APGM(
         x = jax.nn.softmax(x)
         best_x = jax.nn.softmax(best_x)
 
-    if not log_trajectory:
-        return x, best_x
-    else:
+    if log_trajectory:
         logger.clean_trajectory()
         return x, best_x, logger
+    if trajectory_fn is not None:
+        return x, best_x, trajectory
+    return x, best_x
+
+
+def batched_simplex_APGM(
+    *,
+    loss_function: AbstractLoss,
+    x: Float[Array, "B N 20"],
+    n_steps: int,
+    stepsize: float,
+    momentum: float = 0.0,
+    key: jax.Array | None = None,
+    max_gradient_norm: float | None = None,
+    scale: float = 1.0,
+    logspace: bool = False,
+) -> tuple[Float[Array, "B N 20"], Float[Array, "B N 20"]]:
+    """
+    Batched accelerated projected gradient descent on the simplex.
+    Runs B copies of the optimization in parallel via vmap, where B = x.shape[0].
+
+    Args:
+    - loss_function: loss function (same for all designs)
+    - x: initial soft sequences [B, N, 20]
+    - n_steps: number of optimization steps
+    - stepsize: step size (scalar or [B, 1, 1] array for per-design values)
+    - momentum: momentum factor (scalar or [B, 1, 1] array)
+    - key: jax random key
+    - max_gradient_norm: maximum norm of the gradient
+    - scale: proximal scaling factor
+    - logspace: whether to optimize in log space
+
+    returns:
+    - x: final soft sequences [B, N, 20]
+    - best_x: best soft sequences found during optimization [B, N, 20]
+    """
+    assert x.ndim == 3, f"x must be 3D [B, N, 20], got {x.ndim}D"
+    B = x.shape[0]
+
+    if max_gradient_norm is None:
+        max_gradient_norm = np.sqrt(x.shape[1])
+
+    if key is None:
+        key = jax.random.key(np.random.randint(0, 10000))
+
+    if not logspace:
+        flat = np.array(x).reshape(-1, x.shape[-1])
+        x = jnp.array(projection_simplex(flat).reshape(x.shape), dtype=jnp.float32)
+
+    best_vals = jnp.full(B, jnp.inf)
+    best_x = x
+    x_prev = x
+
+    for _iter in range(n_steps):
+        start_time = time.time()
+        v = jnp.array(x + momentum * (x - x_prev), dtype=jnp.float32)
+        v_eval = jax.nn.softmax(v, axis=-1) if logspace else v
+
+        values, auxs, grads = batched_eval(loss_function, v_eval, jax.random.split(key, B))
+
+        norms = np.sqrt((grads**2).sum(axis=(-2, -1)))
+        clip = np.where(norms > max_gradient_norm, max_gradient_norm / norms, 1.0)
+        grads = grads * np.asarray(clip)[:, None, None]
+
+        key = jax.random.fold_in(key, 0)
+
+        if logspace:
+            x_new = scale * (v - stepsize * grads)
+        else:
+            flat = np.array(scale * (v - stepsize * grads)).reshape(-1, x.shape[-1])
+            x_new = jnp.array(projection_simplex(flat).reshape(x.shape), dtype=jnp.float32)
+
+        x_prev = x
+        x = x_new
+
+        better = (np.array(values) < np.array(best_vals)) & ~np.isnan(values)
+        best_vals = jnp.where(jnp.array(better), values, best_vals)
+        best_x = jnp.where(jnp.array(better)[:, None, None], x, best_x)
+
+        for i in range(B):
+            aux_i = jax.tree.map(lambda v: v[i], auxs)
+            average_nnz = (
+                (x[i] > 0.01).sum(-1).mean()
+                if not logspace
+                else (jax.nn.softmax(x[i]) > 0.01).sum(-1).mean()
+            )
+            # adapted to local _print_iter: metrics under "optim" so they print under minimal=True
+            _print_iter(
+                f"{_iter}[{i}]",
+                {"optim": {"loss": values[i], "nnz": average_nnz, "time": time.time() - start_time}, "": aux_i},
+            )
+
+    if logspace:
+        x = jax.nn.softmax(x, axis=-1)
+        best_x = jax.nn.softmax(best_x, axis=-1)
+
+    return x, best_x
+
+
+def _topb_unseen_mutations(seq, g, seen, b):
+    """Pick up to b 1-hop neighbours of `seq` ranked by first-order predicted delta.
+
+    Returns (candidates, predicted_deltas) with shapes (m, N) and (m,), m <= b.
+    Returns None if every 1-hop neighbour has already been seen.
+    """
+    N, K = g.shape
+    a0 = seq.astype(np.int64)
+    delta = g - g[np.arange(N), a0][:, None]
+    delta[np.arange(N), a0] = np.inf  # mask no-ops
+
+    order = np.argsort(delta.ravel(), kind="stable")
+
+    cands = []
+    deltas = []
+    for idx in order:
+        d = delta.ravel()[idx]
+        if not np.isfinite(d):
+            break
+        pos, aa = divmod(int(idx), K)
+        cand = seq.copy()
+        cand[pos] = aa
+        if cand.tobytes() in seen:
+            continue
+        cands.append(cand)
+        deltas.append(float(d))
+        if len(cands) == b:
+            break
+
+    if not cands:
+        return None
+    return np.stack(cands), np.asarray(deltas)
+
+
+def batch_greedy_descent(
+    loss: AbstractLoss,
+    sequence: Int[Array, "N"],
+    *,
+    batch_size: int = 16,
+    steps: int = 100,
+    alphabet_size: int = 20,
+    key: jax.Array | None = None,
+) -> tuple[np.ndarray, float]:
+    """Greedy batch hillclimb on a discrete sequence.
+
+    Each step: compute the gradient at the current sequence, rank all
+    single-point mutations by predicted first-order delta, evaluate the
+    top `batch_size` unseen candidates in parallel, and greedily accept
+    the best if it improves. Stops early when the full 1-hop neighbourhood
+    has been evaluated.
+
+    Args:
+    - loss: loss function (called as loss(x, key=...) returning (value, aux))
+    - sequence: (N,) int starting sequence
+    - batch_size: number of candidate mutations evaluated per step
+    - steps: maximum number of steps
+    - alphabet_size: token alphabet size
+    - key: jax random key (fixed across all evals for deterministic comparison)
+
+    Returns:
+    - best_seq: best sequence found
+    - best_val: loss at best sequence
+    """
+    sequence = np.asarray(sequence, dtype=np.int32).copy()
+    assert sequence.ndim == 1, f"sequence must be 1D [N], got {sequence.ndim}D"
+    B = int(batch_size)
+
+    if key is None:
+        key = jax.random.key(np.random.randint(0, 10000))
+
+    # initial eval
+    x0 = jax.nn.one_hot(jnp.asarray(sequence[None]), alphabet_size)
+    vals, aux0, grads = batched_eval(loss, x0, jnp.broadcast_to(key, (x0.shape[0], *key.shape)))
+    v = float(np.asarray(vals)[0])
+    g = np.asarray(grads)[0]
+    aux = jax.tree.map(lambda a: a[0], aux0)
+
+    # adapted to local _print_iter: metrics under "optim"
+    _print_iter("init", {"optim": {"loss": v}, "": aux})
+
+    best_seq = sequence.copy()
+    best_val = v
+    seen: set[bytes] = {sequence.tobytes()}
+
+    for it in range(steps):
+        start_time = time.time()
+
+        picked = _topb_unseen_mutations(sequence, g, seen, B)
+        if picked is None:
+            print(f"step {it}: neighbourhood exhausted, stopping")
+            break
+        cands, _ = picked
+        m = cands.shape[0]
+
+        xs = jax.nn.one_hot(jnp.asarray(cands), alphabet_size)
+        vals, auxs, grads_batch = batched_eval(loss, xs, jnp.broadcast_to(key, (xs.shape[0], *key.shape)))
+        vals_np = np.asarray(vals)
+
+        for c in cands:
+            seen.add(c.tobytes())
+
+        best_in_batch = int(np.argmin(vals_np[:m]))
+        v_best = float(vals_np[best_in_batch])
+
+        if v_best < v:
+            sequence = cands[best_in_batch].copy()
+            v = v_best
+            g = np.asarray(grads_batch)[best_in_batch]
+            aux = jax.tree.map(lambda a: a[best_in_batch], auxs)
+
+        if v < best_val:
+            best_val = v
+            best_seq = sequence.copy()
+
+        # adapted to local _print_iter: metrics under "optim"
+        _print_iter(
+            it,
+            {"optim": {"loss": v, "time": time.time() - start_time}, "": aux},
+        )
+
+    return best_seq, best_val
