@@ -322,7 +322,8 @@ def simplex_APGM(
     momentum: float = 0.0,
     key=None,
     max_gradient_norm: float | None = None,
-    scale=1.0,
+    scale: int = 1.0,
+    e_scale:int | None = None,
     logspace: bool = False,
     log_trajectory: bool = False,
     on_step: Callable | None = None,
@@ -339,6 +340,7 @@ def simplex_APGM(
     - key: jax random key
     - max_gradient_norm: maximum norm of the gradient
     - scale: proximal scaling factor for L2 regularization (or entropic regularization if logspace=True), set to > 1.0 to encourage sparsity
+    - e_scale: end point for scale schedule, if provided scale moves linearly from scale to e_scale.
     - logspace: whether to optimize in log space, which corresponds to a bregman proximal algorithm.
     - log_trajectory: whether to to return a logger object (output format : final, best, logger) containing the pssm and losses trajectory
     - on_step: function to execute at every step, takes (_iter, aux) and returns any value.
@@ -352,6 +354,10 @@ def simplex_APGM(
 
     if max_gradient_norm is None:
         max_gradient_norm = np.sqrt(x.shape[0])
+
+    if e_scale is None: e_scale = scale
+    p = np.linspace(n_steps, e_scale, n_steps)/n_steps
+    scales = scale + (e_scale - scale) * p
 
     if key is None:
         key = jax.random.key(np.random.randint(0, 10000))
@@ -381,9 +387,9 @@ def simplex_APGM(
         key = jax.random.fold_in(key, 0)
 
         if logspace:
-            x_new = scale * (v - stepsize * g)
+            x_new = scales[_iter] * (v - stepsize * g)
         else:
-            x_new = projection_simplex(scale * (v - stepsize * g))
+            x_new = projection_simplex(scales[_iter] * (v - stepsize * g))
 
         x_prev = x
         x = x_new
@@ -441,7 +447,8 @@ def batched_simplex_APGM(
     momentum: float = 0.0,
     key: jax.Array | None = None,
     max_gradient_norm: float | None = None,
-    scale: float = 1.0,
+    scale: int = 1.0,
+    e_scale:int | None = None,
     logspace: bool = False,
     log_trajectory: bool = False,
     on_step: Callable | None = None,
@@ -459,6 +466,7 @@ def batched_simplex_APGM(
     - key: jax random key
     - max_gradient_norm: maximum norm of the gradient
     - scale: proximal scaling factor
+    - e_scale: end point for scale schedule, if provided scale moves linearly from scale to e_scale 
     - logspace: whether to optimize in log space
     - log_trajectory: whether to to return a logger objects (output format : final, best, loggers) containing the pssm and losses trajectory
     - on_step: function to execute at every step, takes (_iter, batch_idx, aux) and returns any value.
@@ -473,6 +481,10 @@ def batched_simplex_APGM(
 
     if max_gradient_norm is None:
         max_gradient_norm = np.sqrt(x.shape[1])
+
+    if e_scale is None: e_scale = scale
+    p = np.linspace(n_steps, e_scale, n_steps)/n_steps
+    scales = scale + (e_scale - scale) * p
 
     if key is None:
         key = jax.random.key(np.random.randint(0, 10000))
@@ -502,9 +514,9 @@ def batched_simplex_APGM(
         key = jax.random.fold_in(key, 0)
 
         if logspace:
-            x_new = scale * (v - stepsize * grads)
+            x_new = scales[_iter] * (v - stepsize * grads)
         else:
-            flat = np.array(scale * (v - stepsize * grads)).reshape(-1, x.shape[-1])
+            flat = np.array(scales[_iter] * (v - stepsize * grads)).reshape(-1, x.shape[-1])
             x_new = jnp.array(projection_simplex(flat).reshape(x.shape), dtype=jnp.float32)
 
         x_prev = x
