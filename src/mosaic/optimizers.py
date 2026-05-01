@@ -427,9 +427,9 @@ def simplex_APGM(
             value,
         )
 
-    if logspace:
-        x = jax.nn.softmax(x)
-        best_x = jax.nn.softmax(best_x)
+    # if logspace:
+    #     x = jax.nn.softmax(x)
+    #     best_x = jax.nn.softmax(best_x)
 
     if log_trajectory:
         logger.clean_trajectory()
