@@ -8,3 +8,13 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Marimo notebook cache
+__marimo__/
+
+# Do not upload uv.lock, you might have installed project specific
+# packages in your uv, keep pyproject.toml as reference 
+uv.lock
+
+# Other specified by upstream 
+.envrc

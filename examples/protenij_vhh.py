@@ -1,9 +1,13 @@
 import marimo
 
-__generated_with = "0.22.0"
+__generated_with = "0.23.3"
 app = marimo.App(width="medium")
 
 with app.setup:
+    import os
+
+    os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
+
     import marimo as mo
     from mosaic.optimizers import simplex_APGM
     import mosaic.losses.structure_prediction as sp
@@ -23,9 +27,11 @@ with app.setup:
     import jax.numpy as jnp
     from protenix.protenij import TrunkEmbedding
     from mosaic.structure_prediction import TargetChain
-    from mosaic.models.protenix import ProtenixV2
+    from mosaic.models.protenix import ProtenixV2, Protenix2025
     from mosaic.proteinmpnn.mpnn import load_abmpnn
     from mosaic.losses.ablang import AbLangPseudoLikelihood, load_ablang
+    from mosaic.losses.ablang2 import AbLang2PseudoLikelihood, load_ablang2
+    from mosaic.losses.sapiens import SapiensPseudoLikelihood, load_sapiens
     from mosaic.losses.esmc import ESMCPseudoLikelihood, load_esmc
     from mosaic.losses.transformations import SetPositions
 
@@ -53,17 +59,15 @@ def _():
 @app.cell(hide_code=True)
 def _():
     mo.md("""
-    We'll use PDL1 as a target; the world will never have enough de novo binders to PDL1. We'll use both an MSA and a template for the target structure.
+    We'll use IL3 as an example because it's small.
     """)
     return
 
 
 @app.cell
 def _():
-    target_structure = gemmi.read_structure("PDL1.pdb")
-    target_sequence = gemmi.one_letter_code(
-        [r.name for r in target_structure[0][0]]
-    )
+    target_structure = gemmi.read_structure("il3.pdb")
+    target_sequence = gemmi.one_letter_code([r.name for r in target_structure[0][0]])
     return target_sequence, target_structure
 
 
@@ -89,7 +93,10 @@ def _():
 
 @app.cell
 def _():
-    protenix = ProtenixV2()
+    # We can also use ProtenixV2 which might be stronger, but more expensive.
+    # Using bf16 speeds up optimization quite a bit and uses less memory, but some older hardware doesn't support it.
+    # protenix = ProtenixV2(bf16=True)
+    protenix = Protenix2025(bf16=True)
     return (protenix,)
 
 
@@ -130,14 +137,14 @@ def _(
             )
             # if you have a particular hotspot you're going for you could use `epitope_idx` here.
         )
-        - 0.0
-        * sp.BinderTargetContact(
-            paratope_idx=np.array(
-                [
-                    i for (i, c) in enumerate(masked_framework_sequence) if c != "X"
-                ]  # discourage binding with the framewor
-            )
-        )
+        # - 0.0
+        # * sp.BinderTargetContact(
+        #     paratope_idx=np.array(
+        #         [
+        #             i for (i, c) in enumerate(masked_framework_sequence) if c != "X"
+        #         ]  # discourage binding with the framewor
+        #     )
+        # )
         # if we really don't like "sidebinders" and want contact ONLY with the CDRs we could add a *negative* BinderTargetContact term here that only applies to framework residues
         # I set this to zero because it seems silly to me: plenty of natural VHHs have framework-target contacts
         # to really discourage these kinds of poses you'd also need to downweight some of the terms below that prefer secondary structure within the binder (WithinBinderPAE, pLDDT, etc)
@@ -153,7 +160,9 @@ def _(
         loss=structure_loss,
         features=design_features,
         recycling_steps=2,
-        sampling_steps=20,
+        # sampling_steps=20,
+        # Typically we'd use more than 5 sampling steps, but here it seems fine and gives a nice speedup.
+        sampling_steps=5,
     )
 
     # we use SetPositions to fix the framework AAs
