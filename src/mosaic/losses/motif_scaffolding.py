@@ -5,7 +5,7 @@ import numpy as np
 from jaxtyping import Float, Array
 
 from mosaic.common import LossTerm, restype_three_to_one, TOKENS
-from mosaic.structure_prediction import AbstractStructureOutput
+from mosaic.structure_prediction import StructureModelOutput
 from mosaic.util import kabsch, gram_schmidt
     
 import biotite.structure as struct
@@ -200,7 +200,7 @@ class DistogramCCE(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         # create gt distogram for scaffolded positions
@@ -237,7 +237,7 @@ class FAPE(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         def robust_norm(x, eps=1e-8):
@@ -284,7 +284,7 @@ class RMSD(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         # only keep scaffold positions
