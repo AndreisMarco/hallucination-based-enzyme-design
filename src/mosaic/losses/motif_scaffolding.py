@@ -7,9 +7,11 @@ from jaxtyping import Float, Array
 from mosaic.common import LossTerm, restype_three_to_one, TOKENS
 from mosaic.structure_prediction import StructureModelOutput
 from mosaic.util import kabsch, gram_schmidt
+from mosaic.structure_prediction import TargetChain
     
 import biotite.structure as struct
 from biotite.structure.io import pdb, pdbx
+import gemmi
     
 class Scaffold():
     def __init__(self,
@@ -97,11 +99,14 @@ class Scaffold():
             f"starting from 0 to len(keep_intervals)-1={len(keep_intervals)-1}"
 
         # load and filter to amino acids
+        self.structure_path = path_to_structure
         if path_to_structure.endswith(".pdb"):
             pdb_file = pdb.PDBFile.read(path_to_structure)
+            self.file_type = "pdb"
             structure = pdb.get_structure(pdb_file, model=1)
         elif path_to_structure.endswith(".cif"):
             cif_file = pdbx.CIFFile.read(path_to_structure)
+            self.file_type = "cif"
             structure = pdbx.get_structure(cif_file, model=1)
         else:
             raise ValueError("File must be .pdb or .cif")
@@ -111,6 +116,8 @@ class Scaffold():
 
         # assemble dummy sequence
         all_bb, all_ca, all_pb, all_seq, all_mask = [], [], [], [], []
+        # per-scaffold-position source residue id (None for loop positions)
+        template_seqids: list[int | None] = []
         for i, frag_idx in enumerate(order):
             # create loop start/middle loop
             if loops[i] > 0:
@@ -120,6 +127,7 @@ class Scaffold():
                 all_pb.append(pb)
                 all_seq.append(seq)
                 all_mask.append(np.zeros(loops[i], dtype=bool))
+                template_seqids.extend([None] * loops[i])
             # create keep intervals
             start, end = keep_intervals[frag_idx]
             bb, ca, pb, seq = extract_fragment(structure, start, end)
@@ -129,6 +137,7 @@ class Scaffold():
             all_pb.append(pb)
             all_seq.append(seq)
             all_mask.append(np.ones(L, dtype=bool))
+            template_seqids.extend(range(start, end + 1))
         # create last loop
         if loops[-1] > 0:
             bb, ca, pb, seq = make_loop(loops[-1])
@@ -137,6 +146,8 @@ class Scaffold():
             all_pb.append(pb)
             all_seq.append(seq)
             all_mask.append(np.zeros(loops[-1], dtype=bool))
+            template_seqids.extend([None] * loops[-1])
+        self._template_seqids = template_seqids
 
         # store coords and others
         bb_coords = np.concatenate(all_bb,   axis=0)  # [L_total, 4, 3]
@@ -182,6 +193,41 @@ class Scaffold():
         pssm = nn.softmax(0.5 * pssm, axis=-1)
         onehot = jax.nn.one_hot(aa_indices, num_classes=20)
         return jnp.where(self.mask[:, None], onehot, pssm)
+    
+    def build_gemmi_chain(self, use_msa: bool = False, use_template: bool = False):
+        template_chain = None
+        template_mask = None
+
+        if use_template:
+            # source structure (full atoms) for the motif residues
+            src_st = gemmi.read_structure(self.structure_path)
+            src_st.remove_ligands_and_waters()
+            src_chain = src_st[0][0]
+            src_by_seqid = {r.seqid.num: r for r in src_chain}
+
+            # build a new chain that follows the scaffold layout: motif residues
+            # are cloned in their scaffold positions; loop slots are UNK
+            # placeholders with no atoms (-> template_all_atom_mask=0 there).
+            new_chain = gemmi.Chain("A")
+            for new_idx, src_seqid in enumerate(self._template_seqids, start=1):
+                if src_seqid is None:
+                    r = gemmi.Residue()
+                    r.name = "UNK"
+                else:
+                    r = src_by_seqid[src_seqid].clone()
+                r.seqid = gemmi.SeqId(new_idx, " ")
+                new_chain.add_residue(r)
+
+            template_chain = new_chain
+            template_mask = self.mask
+
+        self.chain = TargetChain(
+            sequence=self.sequence,
+            use_msa=use_msa,
+            template_chain=template_chain,
+            template_mask=template_mask,
+        )
+        return self.chain
     
 class DistogramCCE(LossTerm):
     gt_distogram: Float[Array, "N N"]
