@@ -307,8 +307,17 @@ def make_af_features(chains: list[TargetChain]) -> dict[str, jax.Array]:
     for c in chains:
         if c.template_chain is not None:
             gemmi_seq = gemmi.one_letter_code([r.name for r in c.template_chain])
-            if gemmi_seq != c.sequence:
-                raise Exception(f"Template sequence does not match sequence for {c}")
+            if c.template_mask is None:
+                if gemmi_seq != c.sequence:
+                    raise Exception(f"Template sequence does not match sequence for {c}")
+            else:
+                mask = np.asarray(c.template_mask, dtype=bool)
+                gemmi_arr = np.array(list(gemmi_seq))
+                seq_arr = np.array(list(c.sequence))
+                if not np.array_equal(gemmi_arr[mask], seq_arr[mask]):
+                    raise Exception(
+                        f"Template sequence does not match sequence at masked positions for {c}"
+                    )
 
     # TODO: handle homo-multimers better?
     L = sum(len(c.sequence) for c in chains)
@@ -384,19 +393,28 @@ class AlphaFold2(StructurePredictionModel):
         for c in chains:
             assert c.polymer_type == "PROTEIN", "AF2 only supports protein chains"
             assert not c.use_msa, "AF2 interface does not support MSA yet"
-
+            if c.template_mask is not None:
+                assert c.template_chain is not None, "A template mask was provided without a template chain"
+                assert len(c.template_mask) == len(c.sequence), \
+                       f"The template mask must match the length of the template ({len(c.sequence)}), got {len(c.template_mask)}"
+        
         return make_af_features(chains=chains), None
 
-    def binder_features(self, binder_length, chains: list[TargetChain],  init_sequence: str | None=None):
-        if init_sequence is None:
+    def binder_features(self, binder_length, chains: list[TargetChain],  binder_chain: TargetChain | None=None):
+        if binder_chain is None:
             sequence = "G" * binder_length
+            binder_chain = TargetChain(sequence=sequence, use_msa=False,)
         else:
-            if binder_length != len(init_sequence):
-                raise ValueError(f"Specified init_sequence length ({len(init_sequence)}) does not match specified binder_length ({binder_length})")
-            sequence = init_sequence.replace("X", "G")
+            if binder_length != len(binder_chain.sequence):
+                raise ValueError(f"Specified binder sequence length ({len(binder_chain.sequence)}) does not match the specified binder_length ({binder_length})")
+            # AF2 interface does not accept UNK / X tokens, work around to use glycine instead
+            binder_chain = TargetChain(sequence=binder_chain.sequence.replace("X", "G"),
+                                       use_msa=binder_chain.use_msa,
+                                       template_chain=binder_chain.template_chain,
+                                       template_mask=binder_chain.template_mask)
             
         features, _ = self.target_only_features(
-            [TargetChain(sequence=sequence, use_msa=False)] + chains
+            [binder_chain] + chains
         )
         return features, None
 

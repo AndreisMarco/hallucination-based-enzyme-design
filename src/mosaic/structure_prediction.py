@@ -8,7 +8,7 @@
 import gemmi
 from dataclasses import dataclass
 import equinox as eqx
-from jaxtyping import Array, Float, PyTree
+from jaxtyping import Array, Float, PyTree, Bool
 
 from abc import abstractmethod
 
@@ -26,6 +26,7 @@ class TargetChain:
     polymer_type: str = PolymerType.PROTEIN
     use_msa: bool = True
     template_chain: gemmi.Chain | None = None
+    template_mask: Bool[Array, "N"] | None = None
 
 
 class StructurePrediction(eqx.Module):
