@@ -314,7 +314,7 @@ class FAPE(LossTerm):
         return fape, {"fape": fape}
 
 class RMSD(LossTerm):
-    gt_coords: Float[Array, "N 4 3"]
+    gt_coords: jax.Array
     mask:      Float[Array, "N"]
     _idx:      Float[Array, "M"]
 
@@ -324,8 +324,11 @@ class RMSD(LossTerm):
         self._idx      = jnp.where(mask, size=int(mask.sum()))[0]
 
     @classmethod
-    def from_scaffold(cls, scaffold: Scaffold):
-        return cls(gt_coords=scaffold.backbone_coordinates(), mask=scaffold.mask)
+    def from_scaffold(cls, scaffold: Scaffold, calpha_only: bool = False):
+        coords = scaffold.backbone_coordinates()       # [L, 4, 3] = N/CA/C/O
+        if calpha_only:
+            coords = coords[:, 1, :]                   # [L, 3] CA only
+        return cls(gt_coords=coords, mask=scaffold.mask)
 
     def __call__(
         self,
@@ -334,11 +337,14 @@ class RMSD(LossTerm):
         key,
     ):
         # only keep scaffold positions
-        pred_bb = output.backbone_coordinates[self._idx] 
-        gt_bb = self.gt_coords[self._idx]               
+        pred_bb = output.backbone_coordinates[self._idx]   # [M, 4, 3]
+        gt_bb   = self.gt_coords[self._idx]                # [M, 3] or [M, 4, 3]
+        # if gt is CA-only, slice pred to CA as well
+        if gt_bb.ndim == 2:
+            pred_bb = pred_bb[:, 1, :]                     # [M, 3]
         # align pred to gt
         pred = pred_bb.reshape(-1, 3)
-        gt = gt_bb.reshape(-1, 3)
+        gt   = gt_bb.reshape(-1, 3)
         R, t = kabsch(pred, gt)
         pred_aligned = pred @ R + t
         # compute RMSD
