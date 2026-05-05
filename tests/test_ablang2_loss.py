@@ -2,8 +2,8 @@ import numpy as np
 import torch
 import jax
 import jax.numpy as jnp
-# The Ablang2PseudoLikelihood_source and load_ablang2_source uses the source functions to not conflict with Luis version
-from mosaic.losses.ablang2 import load_ablang2_source, Ablang2PseudoLikelihood_source
+# The Ablang2PseudoLikelihood and load_ablang2 uses the source functions to not conflict with Luis version
+from mosaic.losses.ablang2 import load_ablang2, Ablang2PseudoLikelihood
 from mosaic.losses.transformations import SetPositions
 import ablang2
 import mosaic.optimizers as optimizers_module
@@ -30,7 +30,7 @@ def _use_gpu():
 
 @pytest.fixture
 def ablang2_jax():
-    model, tok = load_ablang2_source()
+    model, tok = load_ablang2()
     return model, tok
 
 
@@ -43,7 +43,7 @@ def ablang2_torch():
 def test_ablang2_designable_pseudo_likelihood_matches_direct_computation(
     ablang2_jax, ablang2_torch
 ):
-    """Check that Ablang2PseudoLikelihood_source PPL matches ablang2's
+    """Check that Ablang2PseudoLikelihood PPL matches ablang2's
     ``pretrained(mode='pseudo_log_likelihood')`` on a single heavy chain."""
     heavy = (
         "EVQLLESGGEVKKPGASVKVSCRASGYTFRNYGLTWVRQAPGQGLEWMGWISAYNGNTNYAQKFQG"
@@ -59,7 +59,7 @@ def test_ablang2_designable_pseudo_likelihood_matches_direct_computation(
         jnp.array([TOKENS.index(aa) for aa in heavy], dtype=jnp.int32),
         len(TOKENS),
     )
-    loss_term = Ablang2PseudoLikelihood_source(
+    loss_term = Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
         heavy_len=n,
@@ -80,7 +80,7 @@ def test_ablang2_designable_pseudo_likelihood_matches_direct_computation(
 def test_ablang2_designable_pseudo_likelihood_light_only_matches_ablang2(
     ablang2_jax, ablang2_torch
 ):
-    """Check that Ablang2PseudoLikelihood_source PPL matches ablang2's
+    """Check that Ablang2PseudoLikelihood PPL matches ablang2's
     ``pretrained(mode='pseudo_log_likelihood')`` on a single light chain."""
     light = (
         "DIQLTQSPLSLPVTLGQPASISCRSSQSLEASDTNIYLSWFQQRPGQSPRRLIYKISNRDSGVPD"
@@ -96,7 +96,7 @@ def test_ablang2_designable_pseudo_likelihood_light_only_matches_ablang2(
         jnp.array([TOKENS.index(aa) for aa in light], dtype=jnp.int32),
         len(TOKENS),
     )
-    loss_term = Ablang2PseudoLikelihood_source(
+    loss_term = Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
         heavy_len=0,
@@ -115,7 +115,7 @@ def test_ablang2_designable_pseudo_likelihood_light_only_matches_ablang2(
 def test_ablang2_designable_pseudo_likelihood_paired_matches_ablang2(
     ablang2_jax, ablang2_torch
 ):
-    """Check that Ablang2PseudoLikelihood_source PPL matches ablang2's
+    """Check that Ablang2PseudoLikelihood PPL matches ablang2's
     ``pretrained(mode='pseudo_log_likelihood')`` on a paired heavy+light input."""
     heavy = (
         "EVQLLESGGEVKKPGASVKVSCRASGYTFRNYGLTWVRQAPGQGLEWMGWISAYNGNTNYAQKFQG"
@@ -136,7 +136,7 @@ def test_ablang2_designable_pseudo_likelihood_paired_matches_ablang2(
         jnp.array([TOKENS.index(aa) for aa in full_seq], dtype=jnp.int32),
         len(TOKENS),
     )
-    loss_term = Ablang2PseudoLikelihood_source(
+    loss_term = Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
         heavy_len=n_h,
@@ -188,7 +188,7 @@ def test_ablang2_designable_pseudo_likelihood_matches_per_residue_aggregation(
         jnp.array([TOKENS.index(aa) for aa in heavy], dtype=jnp.int32),
         len(TOKENS),
     )
-    loss_term = Ablang2PseudoLikelihood_source(
+    loss_term = Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
         heavy_len=n,
@@ -238,7 +238,7 @@ def test_setpositions_vs_designable_positions_gradients(ablang2_jax):
     )
 
     # --- Approach 1: designable_positions passed explicitly ---
-    loss_with_dp = Ablang2PseudoLikelihood_source(
+    loss_with_dp = Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
         heavy_len=n,
@@ -261,7 +261,7 @@ def test_setpositions_vs_designable_positions_gradients(ablang2_jax):
         [TOKENS.index(aa) if aa != "X" else -1 for aa in wildtype_with_x],
         dtype=jnp.int32,
     )
-    loss_no_dp = Ablang2PseudoLikelihood_source(
+    loss_no_dp = Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
         heavy_len=n,
@@ -290,7 +290,7 @@ def test_setpositions_combined_with_designable_positions(ablang2_jax):
 
     SetPositions reconstructs the same full sequence that approach 1 already receives
     (wildtype at fixed positions, optimised values at variable positions), so the inner
-    Ablang2PseudoLikelihood_source sees exactly the same inputs in both cases.  The normali-
+    Ablang2PseudoLikelihood sees exactly the same inputs in both cases.  The normali-
     sation denominator is M in both cases, so loss values and gradients must match.
     """
     heavy = (
@@ -314,7 +314,7 @@ def test_setpositions_combined_with_designable_positions(ablang2_jax):
     seq_variable = seq_full[variable_positions]  # (M, 20)
 
     # --- Approach 1: designable_positions, full sequence input ---
-    loss_dp = Ablang2PseudoLikelihood_source(
+    loss_dp = Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
         heavy_len=n,
@@ -333,7 +333,7 @@ def test_setpositions_combined_with_designable_positions(ablang2_jax):
     loss_combined = SetPositions(
         wildtype_tokens,
         variable_positions,
-        Ablang2PseudoLikelihood_source(
+        Ablang2PseudoLikelihood(
             model=model,
             tokenizer=tok,
             heavy_len=n,
