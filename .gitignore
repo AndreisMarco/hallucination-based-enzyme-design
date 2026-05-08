@@ -13,10 +13,10 @@ wheels/
 __marimo__/
 
 # Do not upload uv.lock, you might have installed project specific
-# packages in your uv, keep pyproject.toml as reference 
+# packages in your uv, keep pyproject.toml as reference
 uv.lock
 
-# Other specified by upstream 
+# Other specified by upstream
 .envrc
 
 # project specific specific
