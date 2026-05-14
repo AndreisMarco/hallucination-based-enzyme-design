@@ -133,7 +133,7 @@ def get_trunk_state(
     state = initial_recycling_state
     initial_embedding = model.embed_inputs(
         input_feature_dict=features
-    )  
+    )
     if state is None:
         state = TrunkEmbedding(
             s=jnp.zeros_like(initial_embedding.s_init),
@@ -270,9 +270,9 @@ class MultiSampleProtenixLoss(LossTerm):
         Run the structure and confidence modules multiple times from the same trunk output.
         When `reduction` is jnp.mean this is equivalent to the expected loss over multiple samples *assuming a deterministic trunk*, but faster.
         This will consume quite a bit of memory -- if you'd like to sacrifice some speed for memory, replace the vmap below with a jax.lax.map.
-        
+
         Args:
-        - features_to_log: a list of str corresponding to elements of the features dictionary, to add to the aux from the loss function. 
+        - features_to_log: a list of str corresponding to elements of the features dictionary, to add to the aux from the loss function.
     """
 
     def __call__(self, sequence: Float[Array, "N 20"], key):
@@ -314,7 +314,7 @@ class MultiSampleProtenixLoss(LossTerm):
 
         def _sort_if_scalar(v):
             if isinstance(v, jax.Array) and v.shape == (self.num_samples,):
-                return list(v[sortperm])
+                return v[sortperm]
             return v
 
         auxs = jax.tree.map(_sort_if_scalar, auxs)

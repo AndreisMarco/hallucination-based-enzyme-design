@@ -75,7 +75,7 @@ def target_only_features(chains: list[TargetChain]):
 
 
 def build_template_yaml(chain_names: str, chains: list[TargetChain]):
-    # boltz wants perfect .cifs :( 
+    # boltz wants perfect .cifs :(
     templates = {
         chain_id: c.template_chain
         for chain_id, c in zip(chain_names, chains)
@@ -108,13 +108,13 @@ def build_template_yaml(chain_names: str, chains: list[TargetChain]):
         tf = NamedTemporaryFile(suffix=".cif")
 
         template_yaml = f"""
-        
+
 templates:
   - cif: {tf.name}
     chain_id: [{', '.join(k for k in templates)}]
     template_id: [{', '.join(k for k in templates)}]
 """
-        
+
         st.setup_entities()
         doc = st.make_mmcif_document()
         doc.write_file(tf.name)
@@ -141,20 +141,20 @@ class Boltz2(StructurePredictionModel):
         return binder_features(binder_length, chains)
 
     def build_loss(
-            self, 
-            *, 
-            loss, 
-            features, 
+            self,
+            *,
+            loss,
+            features,
             recycling_steps=1,
             sampling_steps=None,
             name: str = "boltz2",
             features_to_log: list[str] | None = None
             ):
-        
+
         if features_to_log is not None:
             not_found = [f for f in features_to_log if f not in features.keys()]
-            if len(not_found) != 0: 
-                print(f"The following losses are not registered in the current model: {not_found}")
+            if len(not_found) != 0:
+                print(f"The following features are not registered in the current model: {not_found}")
 
         return Boltz2Loss(
             joltz2=self.model,
@@ -169,21 +169,21 @@ class Boltz2(StructurePredictionModel):
 
     def build_multisample_loss(
             self,
-            *, 
-            loss, 
-            features, 
-            recycling_steps=1, 
-            num_samples: int = 4, 
-            sampling_steps=None, 
-            name: str = "boltz2", 
-            reduction=jnp.mean, 
+            *,
+            loss,
+            features,
+            recycling_steps=1,
+            num_samples: int = 4,
+            sampling_steps=None,
+            name: str = "boltz2",
+            reduction=jnp.mean,
             features_to_log: list[str] | None = None
             ):
-        
+
         if features_to_log is not None:
             not_found = [f for f in features_to_log if f not in features.keys()]
-            if len(not_found) != 0: 
-                print(f"The following losses are not registered in the current model: {not_found}")
+            if len(not_found) != 0:
+                print(f"The following features are not registered in the current model: {not_found}")
 
         return MultiSampleBoltz2Loss(
             joltz2=self.model,
