@@ -239,7 +239,7 @@ def set_binder_sequence(PSSM, features: dict, multimer: bool=True):
         "target_feat": soft_sequence,
         "aatype": jnp.argmax(soft_sequence, axis=-1),
     }
-    
+
     if not multimer:
         return multimer_to_monomer_features(out)
     return out
@@ -399,14 +399,14 @@ class AlphaFold2(StructurePredictionModel):
         return features, None
 
     def build_loss(
-        self, 
-        *, 
-        loss, 
-        features, 
-        recycling_steps=1, 
-        sampling_steps=None, 
-        name="af2", 
-        use_dropout=False, 
+        self,
+        *,
+        loss,
+        features,
+        recycling_steps=1,
+        sampling_steps=None,
+        name="af2",
+        use_dropout=False,
         initial_state=None,
         features_to_log: list[str] | None = None
         ):
@@ -414,8 +414,8 @@ class AlphaFold2(StructurePredictionModel):
 
         if features_to_log is not None:
             not_found = [f for f in features_to_log if f not in features.keys()]
-            if len(not_found) != 0: 
-                print(f"The following losses are not registered in the current model: {not_found}")
+            if len(not_found) != 0:
+                print(f"The following features are not registered in the current model: {not_found}")
 
         return AlphaFoldLoss(
             model=self,
@@ -540,7 +540,7 @@ class AlphaFoldLoss(LossTerm):
     features_to_log: list[str] | None = None
     '''
         Args:
-        - features_to_log: a list of str corresponding to elements of the features dictionary, to add to the aux from the loss function. 
+        - features_to_log: a list of str corresponding to elements of the features dictionary, to add to the aux from the loss function.
     '''
     def __call__(self, PSSM: Float[Array, "N 20"], *, key):
         # pick a random model
@@ -566,9 +566,9 @@ class AlphaFoldLoss(LossTerm):
         # Include any additional specified features
         if self.features_to_log is None:
             feature_dict = {}
-        else: 
+        else:
             feature_dict = {k: output.features[k] for k in self.features_to_log if k in output.features.keys()}
-        
+
         aux = {
             "losses": aux,
             "features": feature_dict

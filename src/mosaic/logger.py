@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import wandb
 from matplotlib.animation import PillowWriter
+from matplotlib.transforms import ScaledTranslation
 
 from mosaic.common import TOKENS
 
@@ -12,24 +13,71 @@ from mosaic.common import TOKENS
 # Helper functions
 # ============================================================================
 
+def _group_losses(losses: dict) -> dict[str, list[tuple[str, np.ndarray]]]:
+    groups = {}
+    for full_name, values in losses.items():
+        if ".losses." in full_name:
+            prefix, loss_name = full_name.split(".losses.", 1)
+        elif "other_losses" in full_name:
+            prefix, loss_name = full_name.split(".", 1)
+        else:
+            prefix, loss_name = "", full_name
+        if prefix not in groups:
+            groups[prefix] = [(loss_name, values)]
+        else:
+            groups[prefix].append((loss_name, values))
+    return groups
+
 def plot_losses(loss: np.ndarray, additional_losses: dict[np.ndarray] | None = None):
     steps = range(len(loss))
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(steps, loss, color="black", linewidth=2.0, label="Total Loss")
+
+    handles, labels = [], []
+    legend_lines = 1
+    groups = {}
+    # divide losses by source (model losses / other losses)
     if additional_losses is not None:
-        for name, values in additional_losses.items():
-            if values.ndim == 2: 
+        groups = _group_losses(additional_losses)
+        legend_lines += sum(len(g) + (1 if p else 0) for p, g in groups.items())
+
+    all_names = [n for g in groups.values() for n, _ in g]
+    max_name_len = max((len(n) for n in all_names))
+    legend_width = (max_name_len + 30) * 0.065 + 0.5
+    fig_h = max(4, legend_lines * 0.35)
+    fig, ax = plt.subplots(figsize=(10 + legend_width, fig_h))
+
+    best_loss, last_loss = float(np.min(loss)), float(loss[-1])
+    line, = ax.plot(steps, loss, color="black", linewidth=2.0)
+    handles.append(line)
+    labels.append(f"Total Loss (best={best_loss:.2f}, last={last_loss:.2f})")
+
+    blank = plt.Line2D([], [], linestyle="none", marker="none")
+    header_indices = set()
+
+    for prefix, group in groups.items():
+        if prefix:
+            header_indices.add(len(handles))
+            handles.append(blank)
+            labels.append(prefix)
+        for name, values in group:
+            if values.ndim == 2:
                 values = np.mean(values, axis=-1)
             if values.mean() < 0:
                 values = -values
                 name = f"(neg) {name}"
-            ax.plot(steps, values, alpha=0.35, linewidth=1.2, label=name)
+            best_val, last_val = float(np.min(values)), float(values[-1])
+            line, = ax.plot(steps, values, alpha=0.35, linewidth=1.2)
+            handles.append(line)
+            labels.append(f"  {name} (best={best_val:.2f}, last={last_val:.2f})")
+
     ax.set_xlabel("step")
     ax.set_ylabel("loss")
     ax.set_xlim(0, len(loss) - 1)
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncols=4, fontsize=8)
+    leg = ax.legend(handles, labels, loc="upper left", bbox_to_anchor=(1.02, 1), fontsize=8)
+    offset = ScaledTranslation(-25 / 72, 0, fig.dpi_scale_trans)
+    for i in header_indices:
+        text = leg.get_texts()[i]
+        text.set_transform(text.get_transform() + offset)
     fig.tight_layout()
-    fig.subplots_adjust(bottom=0.25) 
     return fig
 
 def plot_pssm_heatmap(pssm, ax=None, return_wandb_image: bool = False):
@@ -79,7 +127,7 @@ class TrajectoryLogger:
         self.trajectory_list = None
         self.trajectory = None
         self.is_leaf = is_leaf if is_leaf is not None else _default_is_leaf
-    
+
     def update(self, aux):
         to_cpu = lambda x: np.array(x) if isinstance(x, (jax.Array, jnp.ndarray)) else x
 
@@ -125,9 +173,9 @@ class TrajectoryLogger:
                     "Call clean_trajectory() on each first, or ensure trajectory_list is available."
                 )
         return merged
-    
+
     def __getitem__(self, idx):
-        sliced = TrajectoryLogger(is_leaf=self.is_leaf)        
+        sliced = TrajectoryLogger(is_leaf=self.is_leaf)
         if self.trajectory_list is not None:
             sliced.trajectory_list = jax.tree.map(
                 lambda lst: lst[idx],
@@ -144,7 +192,7 @@ class TrajectoryLogger:
 
         if sliced.trajectory_list is None and sliced.trajectory is None:
             raise RuntimeError("Logger has neither trajectory_list nor trajectory to slice.")
-        
+
         return sliced
 
     def clean_trajectory(self, keep_trajectory_list=False):
@@ -167,7 +215,7 @@ class TrajectoryLogger:
             self.trajectory_list = None
 
         return self.trajectory
-    
+
     def to_flat_dict(self, sep: str = "."):
         if self.trajectory is None:
             self.clean_trajectory()
@@ -178,7 +226,7 @@ class TrajectoryLogger:
             path_str = sep.join(parts) if parts else "value"
             flat[path_str] = leaf
         return flat
-    
+
     @classmethod
     def load(cls, path: str):
         import pickle
@@ -192,8 +240,8 @@ class TrajectoryLogger:
 
         log_path = Path(log_path)
         if not log_path.exists():
-           log_path.mkdir(parents=True, exist_ok=True) 
-        
+           log_path.mkdir(parents=True, exist_ok=True)
+
         if self.trajectory is None:
             self.clean_trajectory()
 

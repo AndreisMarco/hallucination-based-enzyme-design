@@ -498,6 +498,7 @@ class OF3(StructurePredictionModel):
     model: OpenFold3
     default_sampling_steps: int = 20
     default_num_samples: int = 1
+    name: str = "of3"
 
     def __init__(self, default_sampling_steps: int = 20, default_num_samples: int = 1):
         # load the model...
@@ -561,13 +562,17 @@ class OF3(StructurePredictionModel):
         features: Batch,
         recycling_steps: int = 3,
         sampling_steps: int | None = None,
+        name: str | None = None,
+        features_to_log: list[str] | None = None
     ) -> LossTerm:
         return self.build_multisample_loss(
             loss=loss,
             features=features,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
+            name=name if name is not None else self.name,
             num_samples=1,
+            features_to_log=features_to_log,
         )
 
     def build_multisample_loss(
@@ -577,9 +582,17 @@ class OF3(StructurePredictionModel):
         features: Batch,
         recycling_steps: int = 3,
         sampling_steps: int | None = None,
+        name: str | None = None,
         num_samples: int = 4,
         reduction=jnp.mean,
+        features_to_log: list[str] | None = None,
     ) -> MultiSampleOF3Loss:
+
+        if features_to_log is not None:
+            not_found = [f for f in features_to_log if not hasattr(features, f)]
+            if len(not_found) != 0:
+                print(f"The following features are not registered in the current model: {not_found}")
+
         if sampling_steps is None:
             sampling_steps = self.default_sampling_steps
         return MultiSampleOF3Loss(
@@ -588,8 +601,10 @@ class OF3(StructurePredictionModel):
             loss=loss,
             num_cycles=recycling_steps + 1,
             sampling_steps=sampling_steps,
+            name=name if name is not None else self.name,
             num_samples=num_samples,
             reduction=reduction,
+            features_to_log=features_to_log,
         )
 
 
