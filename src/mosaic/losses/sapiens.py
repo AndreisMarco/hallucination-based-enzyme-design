@@ -82,6 +82,7 @@ class SapiensPseudoLikelihood(LossTerm):
 
     model: jsapiens.RobertaForMaskedLMEquinox
     stop_grad: bool = True
+    name: str = "sapiens_pll"
 
     def __call__(self, seq_standard_tokens: Float[Array, "N 20"], *, key):
         n = seq_standard_tokens.shape[0]
@@ -155,4 +156,4 @@ class SapiensPseudoLikelihood(LossTerm):
             )
 
         pll = (masked_log_likelihoods * sapiens_toks_unpadded).sum(-1).mean()
-        return -pll, {"sapiens_pll": pll}
+        return -pll, {self.name: pll}

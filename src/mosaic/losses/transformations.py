@@ -121,10 +121,11 @@ class FixedPositionsPenalty(LossTerm):
 
     position_mask: Bool[Array, "N"] = eqx.field(converter=jnp.array)
     target: Float[Array, "N 20"] = eqx.field(converter=jnp.array)
+    name: str = "fixed_position_penalty"
 
     def __call__(self, seq: Float[Array, "N 20"], *, key):
         r = (((seq - self.target) ** 2).sum(-1) * self.position_mask).sum()
-        return r, {"fixed_position_penalty": r}
+        return r, {self.name: r}
 
     @staticmethod
     def from_residues(sequence_length: int, positions_and_AAs: list[tuple[int, str]]):

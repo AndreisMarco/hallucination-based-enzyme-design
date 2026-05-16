@@ -165,6 +165,7 @@ class ProteinMPNNLoss(LossTerm):
     mpnn: ProteinMPNN
     num_samples: int
     stop_grad: bool = True
+    name: str = "protein_mpnn_ll"
 
     def __call__(
         self,
@@ -227,7 +228,7 @@ class ProteinMPNNLoss(LossTerm):
             jax.vmap(decoder_LL)(jax.random.split(key, self.num_samples))
         ).mean()
 
-        return -binder_ll, {"protein_mpnn_ll": binder_ll}
+        return -binder_ll, {self.name: binder_ll}
 
 # TODO: implement autoregressive sampling
 # for now though the jacobi method converges quickly enough
@@ -311,6 +312,7 @@ class InverseFoldingSequenceRecovery(LossTerm):
     num_samples: int = 16
     jacobi_iterations: int = 10
     bias: Float[Array, "N 20"]  = None
+    name: str = "sequence_recovery"
 
     def __call__(
         self,
@@ -335,7 +337,7 @@ class InverseFoldingSequenceRecovery(LossTerm):
         average_sequence = sequences.mean(0)
         average_sequence = jax.lax.stop_gradient(average_sequence)
         ip = (average_sequence * sequence).sum(-1).mean()
-        return -ip, {"sequence_recovery": ip}
+        return -ip, {self.name: ip}
 
 
 class AllResiduePLLLoss(LossTerm):
@@ -410,4 +412,4 @@ class AllResiduePLLLoss(LossTerm):
             per_position_pll, jnp.arange(binder_length), batch_size=self.chunk_size,
         )
         mean_pll = plls.mean()
-        return -mean_pll, {"pll": mean_pll, "pseudo_perplexity": jnp.exp(-mean_pll)}
+        return -mean_pll, {self.name: mean_pll, f"{self.name}_pseudo_perplexity": jnp.exp(-mean_pll)}

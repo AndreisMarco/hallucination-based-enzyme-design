@@ -74,6 +74,7 @@ def load_natural_marginals(
 class TrigramLL(LossTerm):
     log_probabilities: Float[Array, "20 20 20"]
     stop_grad: bool = False
+    name: str = "trigram_ll"
 
     def __call__(self, soft_sequence: Float[Array, "N 20"], *, key):
         # Expected log likelihood of the soft sequence under the trigram model
@@ -99,7 +100,7 @@ class TrigramLL(LossTerm):
             jnp.arange(soft_sequence.shape[0] - 2)
         ).mean()
 
-        return -ave_log_prob, {"trigram_ll": ave_log_prob}
+        return -ave_log_prob, {self.name: ave_log_prob}
 
     @staticmethod
     def from_pkl(path: Path | str | None = None, stop_grad: bool = False):

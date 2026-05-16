@@ -130,6 +130,7 @@ class WithinBinderContact(LossTerm):
     max_contact_distance: float = 14.0
     min_sequence_separation: int = 8
     num_contacts_per_residue: int = 25
+    name: str = "intra_contact"
 
     def __call__(
         self,
@@ -164,7 +165,7 @@ class WithinBinderContact(LossTerm):
         top_k_mean = top_k_log_probs.mean(axis=-1)
 
         average_log_prob = top_k_mean.mean()
-        return -average_log_prob, {"intra_contact": average_log_prob}
+        return -average_log_prob, {self.name: average_log_prob}
 
 
 class BinderTargetContact(LossTerm):
@@ -172,6 +173,7 @@ class BinderTargetContact(LossTerm):
     paratope_size: int | None = None
     contact_distance: float = 20.0
     epitope_idx: list[int] | None = None
+    name: str = "target_contact"
 
     def __call__(
         self,
@@ -204,12 +206,13 @@ class BinderTargetContact(LossTerm):
             )[0]
 
         average_log_prob = binder_target_max_p.mean()
-        return -average_log_prob, {"target_contact": average_log_prob}
+        return -average_log_prob, {self.name: average_log_prob}
 
 
 class HelixLoss(LossTerm):
     max_distance: float = 6.0
     target_value: float = -2.0
+    name: str = "helix"
 
     def __call__(
         self,
@@ -227,11 +230,12 @@ class HelixLoss(LossTerm):
 
         loss = jax.nn.elu(self.target_value - value)
 
-        return loss, {"helix": loss}
+        return loss, {self.name: loss}
 
 
 class DistogramRadiusOfGyration(LossTerm):
     target_radius: float | None = None
+    name: str = "radius_of_gyration"
 
     def __call__(
         self,
@@ -259,12 +263,13 @@ class DistogramRadiusOfGyration(LossTerm):
             else self.target_radius
         )
         return jax.nn.elu(dgram_radius_of_gyration - rg_th), {
-            "radius_of_gyration": dgram_radius_of_gyration
+            self.name: dgram_radius_of_gyration
         }
 
 
 class MAERadiusOfGyration(LossTerm):
     target_radius: float | None = None
+    name: str = "radius_of_gyration"
 
     def __call__(
         self,
@@ -289,13 +294,13 @@ class MAERadiusOfGyration(LossTerm):
             else self.target_radius
         )
         return jax.nn.elu(dgram_radius_of_gyration - rg_th), {
-            "radius_of_gyration": dgram_radius_of_gyration
+            self.name: dgram_radius_of_gyration
         }
 
 
 class DistogramCE(LossTerm):
     f: Float[Array, "... Bins"]
-    name: str
+    name: str = "distogram_ce"
     l: float = -np.inf
     u: float = np.inf
 
@@ -322,6 +327,8 @@ class DistogramCE(LossTerm):
 
 
 class PLDDTLoss(LossTerm):
+    name: str = "plddt"
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -330,10 +337,12 @@ class PLDDTLoss(LossTerm):
     ):
         binder_len = sequence.shape[0]
         plddt = output.plddt[:binder_len].mean()
-        return -plddt, {"plddt": plddt}
+        return -plddt, {self.name: plddt}
 
 
 class WithinBinderPAE(LossTerm):
+    name: str = "bb_pae"
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -344,10 +353,12 @@ class WithinBinderPAE(LossTerm):
         pae_within = jnp.fill_diagonal(
             output.pae[:binder_len, :binder_len], 0, inplace=False
         ).mean()
-        return pae_within, {"bb_pae": pae_within}
+        return pae_within, {self.name: pae_within}
 
 
 class BinderTargetPAE(LossTerm):
+    name: str = "bt_pae"
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -356,10 +367,12 @@ class BinderTargetPAE(LossTerm):
     ):
         binder_len = sequence.shape[0]
         pae = output.pae[:binder_len, binder_len:].mean()
-        return pae, {"bt_pae": pae}
+        return pae, {self.name: pae}
 
 
 class TargetBinderPAE(LossTerm):
+    name: str = "tb_pae"
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -368,10 +381,12 @@ class TargetBinderPAE(LossTerm):
     ):
         binder_len = sequence.shape[0]
         pae = output.pae[binder_len:, :binder_len].mean()
-        return pae, {"tb_pae": pae}
+        return pae, {self.name: pae}
 
 
 class IPTMLoss(LossTerm):
+    name: str = "iptm"
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -389,10 +404,12 @@ class IPTMLoss(LossTerm):
             bin_centers=output.pae_bins,
             pair_mask=pair_mask,
         ).max()
-        return -iptm, {"iptm": iptm}
+        return -iptm, {self.name: iptm}
 
 
 class BinderTargetIPTM(LossTerm):
+    name: str = "bt_iptm"
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -410,10 +427,12 @@ class BinderTargetIPTM(LossTerm):
             bin_centers=output.pae_bins,
             pair_mask=pair_mask,
         )[: sequence.shape[0]].max()  # limit to binder index
-        return -bt_iptm, {"bt_iptm": bt_iptm}
+        return -bt_iptm, {self.name: bt_iptm}
 
 
 class BinderPTMLoss(LossTerm):
+    name: str = "binder_ptm"
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -429,11 +448,12 @@ class BinderPTMLoss(LossTerm):
             bin_centers=output.pae_bins,
             pair_mask=pair_mask,
         ).max()
-        return -ptm, {"binder_ptm": ptm}
+        return -ptm, {self.name: ptm}
 
 
 class BinderTargetIPSAE(LossTerm):
     reduce: Callable = jnp.max
+    name: str = "bt_ipsae"
 
     def __call__(
         self,
@@ -455,11 +475,12 @@ class BinderTargetIPSAE(LossTerm):
                 pae_cutoff=10.0,
             )[:binder_len]
         )
-        return -bt_ipsae, {"bt_ipsae": bt_ipsae}
+        return -bt_ipsae, {self.name: bt_ipsae}
 
 
 class TargetBinderIPSAE(LossTerm):
     reduce: Callable = jnp.max
+    name: str = "tb_ipsae"
 
     def __call__(
         self,
@@ -481,10 +502,12 @@ class TargetBinderIPSAE(LossTerm):
                 pae_cutoff=10.0,
             )[binder_len:]
         )
-        return -tb_ipsae, {"tb_ipsae": tb_ipsae}
+        return -tb_ipsae, {self.name: tb_ipsae}
 
 
 class IPSAE_min(LossTerm):
+    name: str = "ipsae_min"
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -513,11 +536,12 @@ class IPSAE_min(LossTerm):
         )
         ipsae_min = jnp.minimum(bt_ipsae, tb_ipsae)
 
-        return -ipsae_min, {"ipsae_min": ipsae_min}
+        return -ipsae_min, {self.name: ipsae_min}
 
 
 class ActualRadiusOfGyration(LossTerm):
     target_radius: float
+    name: str = "actual_rg"
 
     def __call__(
         self,
@@ -531,10 +555,12 @@ class ActualRadiusOfGyration(LossTerm):
             ((first_atom_coords - first_atom_coords.mean(0)) ** 2).sum(-1).mean()
         )
 
-        return jax.nn.elu(rg - self.target_radius), {"actual_rg": rg}
+        return jax.nn.elu(rg - self.target_radius), {self.name: rg}
 
 
 class pTMEnergy(LossTerm):
+    name: str = "pTMEnergy"
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -557,4 +583,4 @@ class pTMEnergy(LossTerm):
         binder_target = energy[:len_binder, len_binder:].mean()
         target_binder = energy[len_binder:, :len_binder].mean()
         E = -(binder_target + target_binder) / 2
-        return E, {"pTMEnergy": E}
+        return E, {self.name: E}

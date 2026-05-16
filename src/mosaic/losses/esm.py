@@ -55,6 +55,7 @@ class ESM2PseudoLikelihood(LossTerm):
     """
     esm: ESM2
     stop_grad: bool = True
+    name: str = "esm_pll"
 
     def __call__(self, seq_standard_tokens: Float[Array, "N 20"], *, key):
         n = seq_standard_tokens.shape[0]
@@ -87,7 +88,7 @@ class ESM2PseudoLikelihood(LossTerm):
         if self.stop_grad:
             masked_log_likelihoods = jax.lax.stop_gradient(masked_log_likelihoods)
         pll =  (masked_log_likelihoods * esm_toks_unpadded).sum(-1).mean()
-        return -pll, {"esm_pll": pll}
+        return -pll, {self.name: pll}
 
 
 

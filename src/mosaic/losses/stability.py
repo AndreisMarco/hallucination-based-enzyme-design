@@ -18,6 +18,7 @@ from esmj import ESMC
 class StabilityModel(LossTerm):
     esm: ESMC
     head: eqx.nn.MLP
+    name: str = "delta_g"
 
     def __call__(
         self,
@@ -39,7 +40,7 @@ class StabilityModel(LossTerm):
         x, _ = self.esm.transformer(x[None])
         estimated_delta_g = self.head(x[0].mean(axis=0))
         estimated_delta_g = estimated_delta_g.clip(-10, 3)
-        return -estimated_delta_g, {"delta_g": estimated_delta_g}  # sign error?
+        return -estimated_delta_g, {self.name: estimated_delta_g}  # sign error?
 
     @staticmethod
     def from_pretrained(esm: ESMC, path: Path = Path("stability.eqx")):

@@ -26,6 +26,7 @@ class AbLangPseudoLikelihood(LossTerm):
     model: AbLang
     tokenizer: ablang.tokenizers.ABtokenizer
     stop_grad: bool = True
+    name: str = "ablang_pll"
 
 
     def __call__(self, seq_standard_tokens: Float[Array, "N 20"], *, key):
@@ -63,7 +64,7 @@ class AbLangPseudoLikelihood(LossTerm):
         if self.stop_grad:
             masked_log_likelihoods = jax.lax.stop_gradient(masked_log_likelihoods)
         pll =  (masked_log_likelihoods * ablang_toks_unpadded).sum(-1).mean()
-        return -pll, {"ablang_pll": pll}
+        return -pll, {self.name: pll}
 
 
 
