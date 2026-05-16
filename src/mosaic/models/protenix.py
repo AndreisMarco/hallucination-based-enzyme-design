@@ -106,9 +106,9 @@ class Protenix(StructurePredictionModel):
     ):
         if features_to_log is not None:
             not_found = [f for f in features_to_log if f not in features.keys()]
-            if len(not_found) != 0: 
-                print(f"The following losses are not registered in the current model: {not_found}")
-        
+            if len(not_found) != 0:
+                print(f"The following features are not registered in the current model: {not_found}")
+
         if sampling_steps is None:
             sampling_steps = self.default_sample_steps
         return MultiSampleProtenixLoss(

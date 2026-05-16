@@ -479,7 +479,7 @@ class MultiSampleBoltz2Loss(LossTerm):
 
         def _sort_if_scalar(v):
             if isinstance(v, jax.Array) and v.shape == (self.num_samples,):
-                return list(v[sortperm])
+                return v[sortperm]
             return v
 
         auxs = jax.tree.map(_sort_if_scalar, auxs)

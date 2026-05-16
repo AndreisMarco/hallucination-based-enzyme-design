@@ -194,7 +194,9 @@ class MultiSampleOF3Loss(LossTerm):
     num_cycles: int = 4
     sampling_steps: int = 20
     num_samples: int = 4
+    name: str = "of3"
     reduction: any = jnp.mean
+    features_to_log: list[str] | None = None
 
     def __call__(self, sequence: Float[Array, "N 20"], key):
         batch = set_binder_sequence(sequence, self.batch)
@@ -221,7 +223,19 @@ class MultiSampleOF3Loss(LossTerm):
             # Only sort+list per-sample scalar metrics. Non-scalar aux leaves
             # (predicted structures, full PSSMs, etc.) pass through unchanged.
             if isinstance(v, jax.Array) and v.shape == (self.num_samples,):
-                return list(v[sortperm])
+                return v[sortperm]
             return v
 
-        return self.reduction(vs), jax.tree.map(_sort_if_scalar, auxs)
+        auxs = jax.tree.map(_sort_if_scalar, auxs)
+
+        if self.features_to_log is None:
+            feature_dict = {}
+        else:
+            feature_dict = {k: getattr(batch, k) for k in self.features_to_log if hasattr(batch, k)}
+
+        auxs = {
+            "losses": auxs,
+            "features": feature_dict,
+        }
+
+        return self.reduction(vs), {self.name: auxs}
