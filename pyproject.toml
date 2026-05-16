@@ -37,7 +37,6 @@ dependencies = [
     "jproteina-complexa",
     "boltz",
     "boltzgen",
-    "jablang2",
     "jsapiens",
 ]
 
@@ -89,7 +88,6 @@ jsapiens = { workspace = true, editable = true }
 
 [tool.uv.workspace]
 members = [
-    "models/jablang2",
     "models/jsapiens",
     "models/protenij",
 ]
