@@ -47,23 +47,33 @@ def project_to_SO3(M: Float[Array, "3 3"]) -> Float[Array, "3 3"]:
     return R
 
 def kabsch(
-    P: Float[Array, "N 3"], Q: Float[Array, "M 3"]
+    P: Float[Array, "N 3"], Q: Float[Array, "N 3"],
+    weights: Float[Array, "N 1"] | None = None,
 ):
     """
     Solve the optimization problem
 
         min_{T in SE(3)} || vmap(T)(P) - Q ||^2
 
+    optionally weighted by `weights` (shape [N, 1]).
     """
 
     assert P.shape == Q.shape, "Point sets must have same shape"
     assert P.shape[-1] == 3, "Points must be 3D"
 
-    centroid_P = jnp.mean(P, axis=0)
-    centroid_Q = jnp.mean(Q, axis=0)
+    if weights is None:
+        centroid_P = jnp.mean(P, axis=0)
+        centroid_Q = jnp.mean(Q, axis=0)
+    else:
+        w_sum = weights.sum((-1, -2))
+        centroid_P = (P * weights).sum(-2, keepdims=True) / w_sum
+        centroid_Q = (Q * weights).sum(-2, keepdims=True) / w_sum
 
     P_centered = P - centroid_P
     Q_centered = Q - centroid_Q
+
+    if weights is not None:
+        P_centered = P_centered * weights
 
     R = project_to_SO3(P_centered.T @ Q_centered)
     t = centroid_Q - centroid_P @ R
