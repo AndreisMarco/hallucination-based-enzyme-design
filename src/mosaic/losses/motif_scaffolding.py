@@ -2,7 +2,7 @@ import jax
 import jax.nn as nn
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Float, Array
+from jaxtyping import Float, Array, Bool
 
 from mosaic.common import LossTerm, restype_three_to_one, TOKENS
 from mosaic.losses.atom37 import ATOM37_INDEX
@@ -408,27 +408,19 @@ class RMSD(LossTerm):
         rmsd = jnp.sqrt(msd)
         return rmsd, {self.name: rmsd}
 
-
-class RMSD_old(LossTerm):
-    gt_coords: jax.Array
-    mask: Float[Array, "N"]
+class MaskedPLDDTLoss(LossTerm):
     _idx: Float[Array, "M"]
-    name: str = "rmsd"
+    name: str = "masked_plddt"
 
-    def __init__(self, gt_coords, mask, name: str = "rmsd"):
-        self.gt_coords = gt_coords
-        self.mask = mask
+    def __init__(self, mask, name: str = "masked_plddt"):
         self._idx = jnp.where(mask, size=int(mask.sum()))[0]
         self.name = name
 
     @classmethod
-    def from_scaffold(cls, scaffold: Scaffold, mode: str = "backbone", name: str = "rmsd"):
-        assert mode in ("ca_only", "backbone", "all_atom"), \
-            f"Unknown RMSD loss mode {mode}, available ca_only, backbone, all_atom"
-        coords = scaffold.backbone_coordinates()       # [L, 4, 3] = N/CA/C/O
-        if mode == "ca_only":
-            coords = coords[:, 1, :]                   # [L, 3]
-        return cls(gt_coords=coords, mask=scaffold.mask, name=name)
+    def from_scaffold(cls, scaffold: Scaffold, name: str = "masked_plddt", inverted: bool = False ):
+        mask = scaffold.mask if not inverted else ~scaffold.mask
+        return cls(mask=mask, name=name)
+
 
     def __call__(
         self,
@@ -436,20 +428,9 @@ class RMSD_old(LossTerm):
         output: StructureModelOutput,
         key,
     ):
-        # only keep scaffold positions
-        pred_bb = output.backbone_coordinates[self._idx]   # [M, 4, 3]
-        gt_bb   = self.gt_coords[self._idx]                # [M, 3] or [M, 4, 3]
-        # if gt is CA-only, slice pred to CA as well
-        if gt_bb.ndim == 2:
-            pred_bb = pred_bb[:, 1, :]                     # [M, 3]
-        # align pred to gt
-        pred = pred_bb.reshape(-1, 3)
-        gt   = gt_bb.reshape(-1, 3)
-        R, t = kabsch(pred, gt)
-        pred_aligned = pred @ R + t
-        # compute RMSD
-        rmsd = jnp.sqrt(jnp.mean(jnp.sum((pred_aligned - gt) ** 2, axis=-1)))
-        return rmsd, {self.name: rmsd}
+        binder_len = sequence.shape[0]
+        plddt = output.plddt[:binder_len][self._idx]
+        return -plddt.mean(), {self.name: plddt.mean()}
 
 if __name__ == "__main__":
     import os
@@ -488,18 +469,21 @@ if __name__ == "__main__":
         backbone_coordinates=pred_backbone_coords,
         distogram_logits=pred_distogram_logits,
         distogram_bins=bins,
+        plddt=np.random.random(size=(len(scaffold))),
         atom37_coords=pred_atom37_coords,
         atom37_mask=pred_atom37_mask,
     )
 
     structure_loss = (
         RMSD.from_scaffold(scaffold=scaffold) +
-        # RMSD.from_scaffold(scaffold=scaffold, mode="all_atom") +
-        # RMSD.from_scaffold(scaffold=scaffold, weighted=True, name="wrmsd") +
-        # RMSD.from_scaffold(scaffold=scaffold, mode="all_atom", weighted=True, name="wrmsd") +
+        RMSD.from_scaffold(scaffold=scaffold, mode="all_atom") +
+        RMSD.from_scaffold(scaffold=scaffold, weighted=True, name="wrmsd") +
+        RMSD.from_scaffold(scaffold=scaffold, mode="all_atom", weighted=True, name="wrmsd") +
         FAPE.from_scaffold(scaffold=scaffold) +
-        DistogramCCE.from_scaffold(scaffold=scaffold)
-    )
+        DistogramCCE.from_scaffold(scaffold=scaffold) +
+        MaskedPLDDTLoss.from_scaffold(scaffold=scaffold, name="scaffold_plddt") +
+        MaskedPLDDTLoss.from_scaffold(scaffold=scaffold, name="non_scaffold_plddt", inverted=True)
+        )
 
     v, aux = structure_loss(
         sequence=np.random.normal(size=(scaffold_length, 20)),
@@ -527,6 +511,7 @@ if __name__ == "__main__":
         backbone_coordinates=gt_bb,
         distogram_logits=gt_logits,
         distogram_bins=bins,
+        plddt=np.ones(scaffold_length),
         atom37_coords=gt_a37,
         atom37_mask=gt_a37m,
     )
@@ -538,7 +523,4 @@ if __name__ == "__main__":
     )
     print(f"loss (GT): {v_gt}")
     for path, leaf in jax.tree.leaves_with_path(aux_gt):
-        name = path[-1].key
-        val = float(leaf)
-        status = "PASS" if abs(val) < 0.05 else "FAIL"
-        print(f"  {name}: {val:.6f}  [{status}]")
+        print(f"{path}: {leaf}")
