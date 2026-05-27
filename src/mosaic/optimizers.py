@@ -15,7 +15,7 @@ from mosaic.logger import TrajectoryLogger
 AbstractLoss = LossTerm | LinearCombination
 
 # ============================================================================
-# Loss and gradient computation 
+# Loss and gradient computation
 # ============================================================================
 
 # Split this up so changing optim parameters doesn't trigger re-compilation of loss function
@@ -49,7 +49,7 @@ def _____eval_loss_and_grad(loss, x, key):
     return eqx.filter_value_and_grad(loss, has_aux=True)(x, key=key)
 
 # ============================================================================
-# Helper functions 
+# Helper functions
 # ============================================================================
 
 def _print_iter(_iter, aux, v):
@@ -89,7 +89,7 @@ def standardize_aux(aux):
             return aux
         else:
             return {OTHER_LOSSES_KEY: aux}
-    
+
     elif isinstance(aux, list):
         for i in aux:
             if _is_model_aux(i):
@@ -103,20 +103,20 @@ def standardize_aux(aux):
 
     return standardized
 
-def clean_pssm(PSSM, loss):       
+def clean_pssm(PSSM, loss):
     '''
-    Unwraps loss transformations which modify the pssm returning a clean pssm 
-    '''                                                                
+    Unwraps loss transformations which modify the pssm returning a clean pssm
+    '''
     if isinstance(loss, NoCys):
         PSSM = NoCys.sequence(PSSM)
-        loss = loss.loss                                
+        loss = loss.loss
     if isinstance(loss, SetPositions):
-        PSSM = loss.sequence(seq=PSSM)                                                            
-    return PSSM    
+        PSSM = loss.sequence(seq=PSSM)
+    return PSSM
 
 # ============================================================================
 # Optimizers
-# ============================================================================ 
+# ============================================================================
 
 @eqx.filter_jit
 def batched_eval(
@@ -188,7 +188,7 @@ def gradient_MCMC(
 
     if key is None:
         key = jax.random.key(np.random.randint(0, 10000))
-    
+
     key_model = key
     (v_0, aux_0), g_0 = _eval_loss_and_grad(
         loss, jax.nn.one_hot(sequence, alphabet_size), key=key_model,
@@ -237,7 +237,7 @@ def gradient_MCMC(
                 break
         muts = ", ".join([f"{pos}:{aa}" for (pos, aa) in mutations])
         print(f"Proposed mutations: {muts}")
-        
+
         ### evaluate the proposal
         (v_1, aux_1), g_1 = _eval_loss_and_grad(
             loss, jax.nn.one_hot(proposal, alphabet_size), key=key_model if fix_loss_key else key,
@@ -264,14 +264,14 @@ def gradient_MCMC(
             f"iter: {_iter}, accept {np.exp(log_acceptance_probability): 0.3f} {v_0: 0.3f} {v_1: 0.3f} {log_q_forward: 0.3f} {log_q_backward: 0.3f}"
         )
 
-        
+
         print()
         if -jax.random.exponential(key=key) < log_acceptance_probability:
             sequence = proposal
             (v_0, aux_0), g_0 = (v_1, aux_1), g_1
             aux_0 = standardize_aux(aux_0)
-        
-        # add optimization info to aux 
+
+        # add optimization info to aux
         aux_0.update({"optim": {
                 "loss": v_0,
                 "time": time.time() - start_time,
@@ -279,7 +279,7 @@ def gradient_MCMC(
                 "pssm": clean_pssm(jax.nn.one_hot(sequence, alphabet_size), loss),
             }})
 
-        if log_trajectory: 
+        if log_trajectory:
             logger.update(aux_0)
 
         if on_step is not None:
@@ -294,11 +294,25 @@ def gradient_MCMC(
         key = jax.random.fold_in(key, 0)
 
     if not log_trajectory:
-        return sequence 
+        return sequence
     else:
         logger.clean_trajectory()
         return sequence, logger
 
+def _ste_transform(x: Float[Array, "N 20"]) -> Float[Array, "N 20"]:
+    """
+    Straight-through estimator: converts soft probabilities to one-hot in the
+    forward pass, but allows gradients to flow through the original soft values.
+
+    Args:
+    - x: soft sequence (N x 20 array with each row in the simplex)
+
+    Returns:
+    - one-hot sequence in forward pass, with gradients from x in backward pass
+    """
+    hard = jax.nn.one_hot(jnp.argmax(x, axis=-1), x.shape[-1])
+    # Forward: use hard (one-hot), Backward: use gradient of x
+    return jax.lax.stop_gradient(hard - x) + x
 
 def projection_simplex(V, z=1):
     V = np.array(V, dtype=np.float64)
@@ -312,7 +326,6 @@ def projection_simplex(V, z=1):
     theta = cssv[np.arange(len(V)), rho - 1] / rho
     return np.maximum(V - theta[:, np.newaxis], 0)
 
-
 def simplex_APGM(
     *,
     loss_function,
@@ -325,6 +338,7 @@ def simplex_APGM(
     scale: int = 1.0,
     e_scale:int | None = None,
     logspace: bool = False,
+    patience: int | None = None,
     log_trajectory: bool = False,
     on_step: Callable | None = None,
 ):
@@ -342,6 +356,7 @@ def simplex_APGM(
     - scale: proximal scaling factor for L2 regularization (or entropic regularization if logspace=True), set to > 1.0 to encourage sparsity
     - e_scale: end point for scale schedule, if provided scale moves linearly from scale to e_scale.
     - logspace: whether to optimize in log space, which corresponds to a bregman proximal algorithm.
+    - patience: number of iterations to wait for improvement before stopping early. If None, early stopping is disabled.
     - log_trajectory: whether to to return a logger object (output format : final, best, logger) containing the pssm and losses trajectory
     - on_step: function to execute at every step, takes (_iter, aux) and returns any value.
 
@@ -371,6 +386,7 @@ def simplex_APGM(
     if log_trajectory:
         logger = TrajectoryLogger()
 
+    iterations_since_improvement = 0
     for _iter in range(n_steps):
         start_time = time.time()
         v = jax.device_put(x + momentum * (x - x_prev))
@@ -399,8 +415,11 @@ def simplex_APGM(
             best_x = (
                 x  # this isn't exactly right, because we evaluated loss at v, not x.
             )
-        
-        # add optimization info to aux 
+            iterations_since_improvement = 0
+        else:
+            iterations_since_improvement += 1
+
+        # add optimization info to aux
         aux = standardize_aux(aux)
         average_nnz = (
             (x > 0.01).sum(-1).mean()
@@ -414,7 +433,7 @@ def simplex_APGM(
                 "pssm": clean_pssm(x, loss_function) if not logspace \
                         else clean_pssm(jax.nn.softmax(x), loss_function),
             }})
-        
+
         if log_trajectory:
             logger.update(aux)
 
@@ -426,6 +445,11 @@ def simplex_APGM(
             aux,
             value,
         )
+
+        # Early stopping check
+        if patience is not None and iterations_since_improvement >= patience:
+            print(f"Early stopping triggered after {_iter + 1} iterations (no improvement for {patience} iterations)")
+            break
 
     # if logspace:
     #     x = jax.nn.softmax(x)
@@ -466,7 +490,7 @@ def batched_simplex_APGM(
     - key: jax random key
     - max_gradient_norm: maximum norm of the gradient
     - scale: proximal scaling factor
-    - e_scale: end point for scale schedule, if provided scale moves linearly from scale to e_scale 
+    - e_scale: end point for scale schedule, if provided scale moves linearly from scale to e_scale
     - logspace: whether to optimize in log space
     - log_trajectory: whether to to return a logger objects (output format : final, best, loggers) containing the pssm and losses trajectory
     - on_step: function to execute at every step, takes (_iter, batch_idx, aux) and returns any value.
@@ -544,7 +568,7 @@ def batched_simplex_APGM(
 
             if log_trajectory:
                 loggers[i].update(aux_i)
-            
+
             if on_step is not None:
                 on_step(_iter, i, aux_i)
 
@@ -563,8 +587,8 @@ def batched_simplex_APGM(
     else:
         for i in range(B): loggers[i].clean_trajectory()
         return x, best_x, loggers
-    
-    
+
+
 def _topb_unseen_mutations(seq, g, seen, b):
     """Pick up to b 1-hop neighbours of `seq` ranked by first-order predicted delta.
 
@@ -648,7 +672,7 @@ def batch_greedy_descent(
     g = np.asarray(grads)[0]
     aux = jax.tree.map(lambda a: a[0], aux0)
     aux = standardize_aux(aux)
-    
+
     _print_iter("init", aux, v)
 
     best_seq = sequence.copy()
@@ -689,7 +713,7 @@ def batch_greedy_descent(
             best_val = v
             best_seq = sequence.copy()
 
-        # add optimization info to aux 
+        # add optimization info to aux
         aux.update({"optim": {
                 "loss": v,
                 "time": time.time() - start_time,
@@ -697,7 +721,7 @@ def batch_greedy_descent(
                 "pssm": clean_pssm(jax.nn.one_hot(sequence, alphabet_size), loss),
             }})
 
-        if log_trajectory: 
+        if log_trajectory:
             logger.update(aux)
 
         if on_step is not None:
