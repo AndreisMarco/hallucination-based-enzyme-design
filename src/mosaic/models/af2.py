@@ -182,7 +182,7 @@ def _initial_guess(st: gemmi.Structure):
     ]
     return initial_guess_all_atoms
 
-def multimer_to_monomer_features(features: dict):
+def multimer_to_monomer_features(features: dict, target_feat_fix: bool = False):
 
     monomer_features = {}
     has_break = jnp.concatenate([jnp.array([0]), jnp.diff(features['asym_id'])])
@@ -190,7 +190,7 @@ def multimer_to_monomer_features(features: dict):
     between_segment_residues = np.zeros(features['asym_id'].shape, dtype=int)
     target_feat = jnp.concatenate([
         between_segment_residues[:, None],
-        jax.nn.one_hot(features['aatype'], 21)
+        features['target_feat'] if target_feat_fix else jax.nn.one_hot(features['aatype'], 21)
         ], axis=-1)
     monomer_features['target_feat'] = target_feat
     monomer_features['residue_index'] = jnp.cumsum(has_break)*50 + jnp.arange(features['asym_id'].size)
@@ -204,7 +204,8 @@ def multimer_to_monomer_features(features: dict):
     return features | monomer_features
 
 
-def set_binder_sequence(PSSM, features: dict, multimer: bool=True):
+def set_binder_sequence(PSSM, features: dict, multimer: bool=True,
+                        target_feat_fix: bool = False, msa_feat_fix: bool = False):
     if PSSM is None:
         PSSM = jnp.zeros((0, 20))
     assert PSSM.shape[-1] == 20
@@ -219,19 +220,21 @@ def set_binder_sequence(PSSM, features: dict, multimer: bool=True):
 
     L = features["aatype"].shape[0]
 
-    # Do not touch this. One-hot seems necessary for multimer models to work properly.
-    hard_pssm = (
-        jax.lax.stop_gradient(
-            jax.nn.one_hot(soft_sequence.argmax(-1), 21) - soft_sequence
+    if msa_feat_fix and not multimer:
+        profile = soft_sequence
+    else:
+        profile = (
+            jax.lax.stop_gradient(
+                jax.nn.one_hot(soft_sequence.argmax(-1), 21) - soft_sequence
+            )
+            + soft_sequence
         )
-        + soft_sequence
-    )
     msa_feat = (
         jnp.zeros((1, L, 49))
         .at[..., 0:21]
         .set(soft_sequence)
         .at[..., 25:46]
-        .set(hard_pssm)
+        .set(profile)
     )
 
     out = features | {
@@ -241,7 +244,7 @@ def set_binder_sequence(PSSM, features: dict, multimer: bool=True):
     }
 
     if not multimer:
-        return multimer_to_monomer_features(out)
+        return multimer_to_monomer_features(out, target_feat_fix=target_feat_fix)
     return out
 
 
@@ -376,6 +379,22 @@ def make_af_features(chains: list[TargetChain]) -> dict[str, jax.Array]:
         ]
     )
 
+    # apply partial template mask: zero out template influence at positions where mask is False
+    keep_segments = []
+    for c in chains:
+        n = len(c.sequence)
+        if c.template_chain is not None and c.template_mask is not None:
+            keep_segments.append(np.asarray(c.template_mask, dtype=bool))
+        else:
+            keep_segments.append(np.ones(n, dtype=bool))
+    keep = np.concatenate(keep_segments)
+
+    if not keep.all():
+        template_mask = template_mask * keep[None, :, None].astype(template_mask.dtype)
+        template_positions = template_positions * keep[None, :, None, None].astype(template_positions.dtype)
+        template_aatype = template_aatype.copy()
+        template_aatype[~keep] = 0
+
     return raw_features | {
         "template_aatype": template_aatype[None],
         "template_all_atom_mask": template_mask,
@@ -387,12 +406,16 @@ class AlphaFold2(StructurePredictionModel):
     af2_forward: callable
     stacked_parameters: PyTree
     multimer: bool
+    target_feat_fix: bool
+    msa_feat_fix: bool
 
-    def __init__(self, data_dir: str = "~/.alphafold", multimer=True):
+    def __init__(self, data_dir: str = "~/.alphafold", multimer=True, af2_fixes=None):
         (forward_function, stacked_params) = load_af2(data_dir=data_dir, multimer=multimer)
         self.af2_forward = forward_function
         self.stacked_parameters = stacked_params
         self.multimer = multimer
+        self.target_feat_fix = "target_feat" in (af2_fixes or [])
+        self.msa_feat_fix = "msa_feat" in (af2_fixes or [])
 
     def target_only_features(self, chains: list[TargetChain]):
         for c in chains:
@@ -402,7 +425,7 @@ class AlphaFold2(StructurePredictionModel):
                 assert c.template_chain is not None, "A template mask was provided without a template chain"
                 assert len(c.template_mask) == len(c.sequence), \
                        f"The template mask must match the length of the template ({len(c.sequence)}), got {len(c.template_mask)}"
-        
+
         return make_af_features(chains=chains), None
 
     def binder_features(self, binder_length, chains: list[TargetChain],  binder_chain: TargetChain | None=None):
@@ -417,7 +440,7 @@ class AlphaFold2(StructurePredictionModel):
                                        use_msa=binder_chain.use_msa,
                                        template_chain=binder_chain.template_chain,
                                        template_mask=binder_chain.template_mask)
-            
+
         features, _ = self.target_only_features(
             [binder_chain] + chains
         )
@@ -489,7 +512,9 @@ class AlphaFold2(StructurePredictionModel):
         key,
     ):
         """Returns (StructureModelOutput, raw AFOutput) — the raw output is needed for postprocessing in predict."""
-        features = set_binder_sequence(PSSM, features, self.multimer)
+        features = set_binder_sequence(PSSM, features, self.multimer,
+                                       target_feat_fix=self.target_feat_fix,
+                                       msa_feat_fix=self.msa_feat_fix)
         N = features["aatype"].shape[0]
 
         if model_idx is None:
@@ -546,7 +571,9 @@ class AlphaFold2(StructurePredictionModel):
             recycling_state=recycling_state,
         )
 
-        _, structure = _postprocess_prediction(set_binder_sequence(PSSM, features, self.multimer), raw)
+        _, structure = _postprocess_prediction(set_binder_sequence(PSSM, features, self.multimer,
+                                                                    target_feat_fix=self.target_feat_fix,
+                                                                    msa_feat_fix=self.msa_feat_fix), raw)
 
         seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
         iptm = -IPTMLoss()(seq, output, key=jax.random.key(0))[0]
