@@ -228,7 +228,7 @@ class ProteinMPNNLoss(LossTerm):
             jax.vmap(decoder_LL)(jax.random.split(key, self.num_samples))
         ).mean()
 
-        return -binder_ll, {self.name: binder_ll}
+        return -binder_ll, {self.name: -binder_ll} # -log(lh) is is for me easier to visualize
 
 # TODO: implement autoregressive sampling
 # for now though the jacobi method converges quickly enough
