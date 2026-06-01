@@ -63,7 +63,7 @@ class AFOutput(eqx.Module):
     recycling_state: state.AlphaFoldState
 
 
-def load_af2(data_dir: str = "~/.alphafold", multimer=True):
+def load_af2(data_dir: str = "~/.alphafold", multimer=True, use_templates=True):
     data_dir = Path(data_dir).expanduser()
 
     if not (data_dir / "params").exists():
@@ -87,20 +87,39 @@ def load_af2(data_dir: str = "~/.alphafold", multimer=True):
         tar_path.unlink()
 
     try:
+        if multimer:
+            model_names = [f"model_{i}_multimer_v3" for i in range(1, 6)]
+        elif use_templates:
+            model_names = [f"model_{i}_ptm" for i in range(1, 3)]
+        else:
+            model_names = [f"model_{i}_ptm" for i in range(1, 6)]
+
         model_params = [
             data.get_model_haiku_params(model_name=model_name, data_dir=data_dir)
-            for model_name in tqdm(
-                [f"model_{i}_{'multimer_v3' if multimer else 'ptm'}" for i in range(1, 6 if multimer else 3)],
-                desc="Loading AF2 params",
-            )
+            for model_name in tqdm(model_names, desc="Loading AF2 params")
         ]
     except FileNotFoundError as e:
         raise FileNotFoundError(
             f"Could not find AF2 parameters in {data_dir}/params. {e}"
         )
+
+    if not multimer and not use_templates:
+        # Models 1-2 have template embedding params that models 3-5 lack.
+        # Strip them so all param trees have the same structure for stacking.
+        ref_keys = set(model_params[2].keys())
+        model_params = [
+            {k: v for k, v in p.items() if k in ref_keys}
+            for p in model_params
+        ]
+
     stacked_model_params = tree.map(lambda *v: np.stack(v), *model_params)
 
-    cfg = config.model_config("model_1_multimer_v3" if multimer else "model_1_ptm")
+    if multimer:
+        cfg = config.model_config("model_1_multimer_v3")
+    elif use_templates:
+        cfg = config.model_config("model_1_ptm")
+    else:
+        cfg = config.model_config("model_3_ptm")
     cfg.max_msa_clusters = 1
     cfg.max_extra_msa = 1
     cfg.masked_msa_replace_fraction = 0
@@ -108,7 +127,8 @@ def load_af2(data_dir: str = "~/.alphafold", multimer=True):
     cfg.model.num_ensemble_eval = 1
     cfg.model.global_config.subbatch_size = None
     cfg.model.global_config.eval_dropout = False
-    cfg.model.global_config.deterministic = True
+    # cfg.model.global_config.deterministic = True # --> fixes dropout_rate=0 in the evoformer
+    cfg.model.global_config.deterministic = False
     cfg.model.global_config.use_remat = True
     cfg.model.num_extra_msa = 1
     cfg.model.resample_msa_in_recycling = False
@@ -152,7 +172,7 @@ def load_af2(data_dir: str = "~/.alphafold", multimer=True):
         )
 
     transformed = hk.transform(_forward_fn)
-    return (transformed.apply, stacked_model_params)
+    return (transformed.apply, stacked_model_params, len(model_names))
 
 
 def _postprocess_prediction(features, prediction: AFOutput):
@@ -406,14 +426,16 @@ class AlphaFold2(StructurePredictionModel):
     af2_forward: callable
     stacked_parameters: PyTree
     multimer: bool
+    num_models: int
     target_feat_fix: bool
     msa_feat_fix: bool
 
-    def __init__(self, data_dir: str = "~/.alphafold", multimer=True, af2_fixes=None):
-        (forward_function, stacked_params) = load_af2(data_dir=data_dir, multimer=multimer)
+    def __init__(self, data_dir: str = "~/.alphafold", multimer=True, use_templates=True, af2_fixes=None):
+        (forward_function, stacked_params, num_models) = load_af2(data_dir=data_dir, multimer=multimer, use_templates=use_templates)
         self.af2_forward = forward_function
         self.stacked_parameters = stacked_params
         self.multimer = multimer
+        self.num_models = num_models
         self.target_feat_fix = "target_feat" in (af2_fixes or [])
         self.msa_feat_fix = "msa_feat" in (af2_fixes or [])
 
@@ -456,7 +478,8 @@ class AlphaFold2(StructurePredictionModel):
         name="af2",
         use_dropout=False,
         initial_state=None,
-        features_to_log: list[str] | None = None
+        features_to_log: list[str] | None = None,
+        average_models: bool = False,
         ):
         assert sampling_steps is None, "AF2 does not support sampling steps"
 
@@ -473,7 +496,8 @@ class AlphaFold2(StructurePredictionModel):
             name=name,
             use_dropout=use_dropout,
             initial_state=initial_state,
-            features_to_log=features_to_log
+            features_to_log=features_to_log,
+            average_models=average_models,
         )
 
     def model_output(
@@ -518,7 +542,7 @@ class AlphaFold2(StructurePredictionModel):
         N = features["aatype"].shape[0]
 
         if model_idx is None:
-            model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5 if self.multimer else 2)
+            model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=self.num_models)
             key = jax.random.fold_in(key, 0)
         else:
             model_idx = jax.device_put(model_idx)
@@ -590,40 +614,39 @@ class AlphaFoldLoss(LossTerm):
     recycling_steps: int = 1
     use_dropout: bool = False
     features_to_log: list[str] | None = None
-    '''
-        Args:
-        - features_to_log: a list of str corresponding to elements of the features dictionary, to add to the aux from the loss function.
-    '''
+    average_models: bool = False
+
     def __call__(self, PSSM: Float[Array, "N 20"], *, key):
-        # pick a random model
-        model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5 if self.model.multimer else 2)
-        key = jax.random.fold_in(key, 0)
-        output = self.model.model_output(
-            PSSM=PSSM,
-            features=self.features,
-            recycling_steps=self.recycling_steps,
-            sampling_steps=None,
-            model_idx=model_idx,
-            key=key,
-            use_dropout=self.use_dropout,
-            recycling_state=self.initial_state,
-        )
+        model_key, key = jax.random.split(key)
+        if self.average_models:
+            model_indices = jnp.arange(self.model.num_models)
+        else:
+            model_indices = jax.random.randint(key=model_key, shape=(), minval=0, maxval=self.model.num_models)[None]
 
-        v, aux = self.loss(
-            PSSM,
-            output=output,
-            key=key,
-        )
+        def apply_loss_to_single_model(model_idx):
+            output = self.model.model_output(
+                PSSM=PSSM,
+                features=self.features,
+                recycling_steps=self.recycling_steps,
+                sampling_steps=None,
+                model_idx=model_idx,
+                key=key,
+                use_dropout=self.use_dropout,
+                recycling_state=self.initial_state,
+            )
+            return self.loss(PSSM, output=output, key=key)
 
-        # Include any additional specified features
+        vs, auxs = jax.lax.map(apply_loss_to_single_model, model_indices)
+        auxs = jax.tree.map(lambda v: jnp.mean(v, axis=0), auxs)
+
         if self.features_to_log is None:
             feature_dict = {}
         else:
-            feature_dict = {k: output.features[k] for k in self.features_to_log if k in output.features.keys()}
+            feature_dict = {k: self.features[k] for k in self.features_to_log if k in self.features.keys()}
 
-        aux = {
-            "losses": aux,
-            "features": feature_dict
+        auxs = {
+            "losses": auxs,
+            "features": feature_dict,
         }
 
-        return v, {self.name: aux}
+        return jnp.mean(vs), {self.name: auxs}
