@@ -299,21 +299,6 @@ def gradient_MCMC(
         logger.clean_trajectory()
         return sequence, logger
 
-def _ste_transform(x: Float[Array, "N 20"]) -> Float[Array, "N 20"]:
-    """
-    Straight-through estimator: converts soft probabilities to one-hot in the
-    forward pass, but allows gradients to flow through the original soft values.
-
-    Args:
-    - x: soft sequence (N x 20 array with each row in the simplex)
-
-    Returns:
-    - one-hot sequence in forward pass, with gradients from x in backward pass
-    """
-    hard = jax.nn.one_hot(jnp.argmax(x, axis=-1), x.shape[-1])
-    # Forward: use hard (one-hot), Backward: use gradient of x
-    return jax.lax.stop_gradient(hard - x) + x
-
 def projection_simplex(V, z=1):
     V = np.array(V, dtype=np.float64)
     n_features = V.shape[1]
@@ -366,6 +351,8 @@ def simplex_APGM(
     - logger: if log_trajectory=True, TrajectoryLogger object containing a concatenation of the elements of aux along the optimization
               (losses, pssm, eventual feature_to_log is specified in the log function).
     """
+    n_variable = x.shape[0]
+    stepsize = stepsize * np.sqrt(n_variable)
 
     if max_gradient_norm is None:
         max_gradient_norm = np.sqrt(x.shape[0])
