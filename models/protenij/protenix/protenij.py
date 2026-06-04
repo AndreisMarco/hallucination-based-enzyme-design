@@ -1921,11 +1921,16 @@ def sample_diffusion(
     gamma_min: float = 1.0,
     noise_scale_lambda: float = 1.003,
     step_scale_eta: float = 1.5,
+    backward_steps=None,
     key,
 ):
     N_atom = input_feature_dict["atom_to_token_idx"].shape[-1]
     batch_shape = s_inputs.shape[:-2]
-
+    N_steps = noise_schedule.shape[0] - 1
+    if backward_steps is None:
+        backward_steps = N_steps
+    backward_start = N_steps - backward_steps
+    step_indices = jnp.arange(N_steps)
 
     # init noise
     # [..., N_sample, N_atom, 3]
@@ -1933,11 +1938,13 @@ def sample_diffusion(
         key=key, shape=(*batch_shape, N_sample, N_atom, 3)
     )
 
-
-
     def body_function(T, in_T):
         x_l, key = T
-        c_tau_last, c_tau = in_T
+        c_tau_last, c_tau, step_idx = in_T
+        x_l = jax.lax.cond(
+            step_idx < backward_start,
+            jax.lax.stop_gradient, lambda x: x, x_l,
+        )
         x_l = x_l - jnp.mean(x_l, axis=-2, keepdims=True)  # Center the coordinates
 
         # Denoise with a predictor-corrector sampler
@@ -1978,7 +1985,7 @@ def sample_diffusion(
 
     x_l, key = jax.lax.scan(body_function,
         init=(x_l, key),
-        xs=(noise_schedule[:-1], noise_schedule[1:]),
+        xs=(noise_schedule[:-1], noise_schedule[1:], step_indices),
     )[0]
 
 
@@ -2285,7 +2292,7 @@ class Protenix(eqx.Module):
 
 
     @eqx.filter_jit
-    def sample_structures(self, *, initial_embedding: InitialEmbedding, trunk_embedding: TrunkEmbedding, input_feature_dict, N_samples, N_steps, key):
+    def sample_structures(self, *, initial_embedding: InitialEmbedding, trunk_embedding: TrunkEmbedding, input_feature_dict, N_samples, N_steps, backward_steps=None, key):
         noise_schedule = self.inference_noise_scheduler(N_step=N_steps)
         coordinates = sample_diffusion(
             denoise_net=self.diffusion_module,
@@ -2299,6 +2306,7 @@ class Protenix(eqx.Module):
             gamma_min=self.gamma_min,
             noise_scale_lambda=self.noise_scale_lambda,
             step_scale_eta=self.step_scale_eta,
+            backward_steps=backward_steps,
             key=key,
         )
         return coordinates

@@ -114,6 +114,7 @@ class Protenix(StructurePredictionModel):
         features,
         recycling_steps=1,
         sampling_steps=None,
+        gradient_steps=None,
         name: str | None = None,
         initial_recycling_state=None,
         features_to_log: list[str] | None = None
@@ -123,6 +124,7 @@ class Protenix(StructurePredictionModel):
             features=features,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
+            gradient_steps=gradient_steps,
             name=name if name is not None else self.name,
             num_samples=1,
             initial_recycling_state=initial_recycling_state,
@@ -137,6 +139,7 @@ class Protenix(StructurePredictionModel):
         recycling_steps=1,
         num_samples: int = 4,
         sampling_steps=None,
+        gradient_steps=None,
         name: str | None = None,
         reduction=jnp.mean,
         initial_recycling_state=None,
@@ -155,6 +158,7 @@ class Protenix(StructurePredictionModel):
             loss=loss,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
+            backward_steps=gradient_steps,
             name=name if name is not None else self.name,
             num_samples=num_samples,
             reduction=reduction,
@@ -170,6 +174,7 @@ class Protenix(StructurePredictionModel):
         features: PyTree,
         recycling_steps=1,
         sampling_steps=None,
+        gradient_steps=None,
         initial_recycling_state=None,
         key,
     ):
@@ -191,6 +196,7 @@ class Protenix(StructurePredictionModel):
             initial_embedding=initial_embedding,
             trunk_state=trunk_state,
             sampling_steps=sampling_steps,
+            backward_steps=gradient_steps,
             key=key,
         )
 

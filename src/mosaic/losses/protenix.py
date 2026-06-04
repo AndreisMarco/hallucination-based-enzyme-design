@@ -181,7 +181,8 @@ def protenix_forward_from_trunk(
     initial_embedding: InitialEmbedding,
     trunk_state: TrunkEmbedding,
     sampling_steps: int,
-    key: jax.Array,
+    backward_steps: int | None = None,
+    key: jax.Array = None,
 ) -> StructureModelOutput:
     """Run distogram, structure, and confidence from pre-computed trunk state."""
     distogram_logits = model.distogram_head(trunk_state.z)
@@ -192,6 +193,7 @@ def protenix_forward_from_trunk(
         input_feature_dict=features,
         N_samples=1,
         N_steps=sampling_steps,
+        backward_steps=backward_steps,
         key=key,
     )
 
@@ -260,6 +262,7 @@ class MultiSampleProtenixLoss(LossTerm):
     loss: LossTerm | LinearCombination
     recycling_steps: int = 1
     sampling_steps: int = 20
+    backward_steps: int | None = None
     num_samples: int = 4
     name: str = "protenix"
     initial_recycling_state: TrunkEmbedding | None = None
@@ -297,6 +300,7 @@ class MultiSampleProtenixLoss(LossTerm):
                 initial_embedding=initial_embedding,
                 trunk_state=trunk_state,
                 sampling_steps=self.sampling_steps,
+                backward_steps=self.backward_steps,
                 key=key,
             )
             v, aux = self.loss(
