@@ -205,7 +205,7 @@ class AlphaFold(hk.Module):
     ):
 
     self.global_config.eval_dropout = use_dropout
-    is_training = not use_dropout
+    is_training = False
 
     impl = AlphaFoldIteration(self.config, self.global_config)
     if safe_key is None:
