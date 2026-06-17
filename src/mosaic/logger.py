@@ -60,11 +60,11 @@ def plot_losses(loss: np.ndarray, additional_losses: dict[np.ndarray] | None = N
             labels.append(prefix)
         for name, values in group:
             if values.ndim == 2:
-                values = np.mean(values, axis=-1)
-            if values.mean() < 0:
+                values = np.nanmean(values, axis=-1)
+            if np.nanmean(values) < 0:
                 values = -values
                 name = f"(neg) {name}"
-            best_val, last_val = float(np.min(values)), float(values[-1])
+            best_val, last_val = float(np.nanmin(values)), float(values[-1])
             line, = ax.plot(steps, values, alpha=0.35, linewidth=1.2)
             handles.append(line)
             labels.append(f"  {name} (best={best_val:.2f}, last={last_val:.2f})")
@@ -126,6 +126,20 @@ def _nan_like(value):
     if isinstance(value, np.ndarray):
         return np.full_like(value, np.nan)
     return np.nan
+
+def _concat_pad(x, y):
+    """Concatenate along axis 0, padding trailing dimensions with NaN if mismatched."""
+    if x.shape[1:] == y.shape[1:]:
+        return np.concatenate([x, y], axis=0)
+    ndim = max(x.ndim, y.ndim)
+    target_shape = tuple(max(x.shape[i] if i < x.ndim else 0, y.shape[i] if i < y.ndim else 0) for i in range(1, ndim))
+    def _pad_to(arr, target):
+        if arr.shape[1:] == target:
+            return arr
+        pad_widths = [(0, 0)] + [(0, t - s) for s, t in zip(arr.shape[1:], target)]
+        return np.pad(arr, pad_widths, mode="constant", constant_values=np.nan)
+    return np.concatenate([_pad_to(x, target_shape), _pad_to(y, target_shape)], axis=0)
+
 
 def _align_trees(tree_a, tree_b, fill_a_fn, fill_b_fn, is_leaf=None):
     """Align two nested dicts so they have identical key structure.
@@ -222,7 +236,7 @@ class TrajectoryLogger:
                 fill_b_fn=lambda v: np.full((n_other, *v.shape[1:]), np.nan) if isinstance(v, np.ndarray) else v,
             )
             merged.trajectory = jax.tree.map(
-                lambda x, y: np.concatenate([x, y], axis=0) if isinstance(x, np.ndarray) else x,
+                lambda x, y: _concat_pad(x, y) if isinstance(x, np.ndarray) else x,
                 a, b,
             )
         else:
