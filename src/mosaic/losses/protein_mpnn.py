@@ -6,7 +6,7 @@ import gemmi
 import jax
 import numpy as np
 from jax import numpy as jnp
-from jaxtyping import Array, Float, Int
+from jaxtyping import Array, Bool, Float, Int
 
 from ..common import TOKENS, LossTerm
 from ..proteinmpnn.mpnn import MPNN_ALPHABET, ProteinMPNN
@@ -34,6 +34,23 @@ def _per_chain_residue_idx(asym_id, residue_idx):
         residue_idx
         + (asym_id[:, None] == jnp.arange(16)[None]) @ res_idx_adjustment
     ) + 100 * asym_id
+
+
+def _build_decoding_order(
+    key,
+    total_length: int,
+    binder_length: int,
+    scaffold_mask: Bool[Array, "N"] | None = None,
+) -> Float[Array, "L"]:
+    """Build decoding order with optional scaffold-aware tiers.
+
+    Without scaffold_mask: target [0,1) then binder [2,3).
+    With scaffold_mask: target [0,1), motif positions [2,3), free positions [4,5).
+    """
+    order = jax.random.uniform(key, shape=(total_length,))
+    if scaffold_mask is None:
+        return order.at[:binder_length].add(2.0)
+    return order.at[:binder_length].add(jnp.where(scaffold_mask, 2.0, 4.0))
 
 
 def load_chain(chain: gemmi.Chain) -> tuple[str, Float[Array, "N 4 3"]]:
@@ -165,6 +182,7 @@ class ProteinMPNNLoss(LossTerm):
     mpnn: ProteinMPNN
     num_samples: int
     stop_grad: bool = True
+    scaffold_mask: Bool[Array, "N"] | None = None
     name: str = "protein_mpnn_ll"
 
     def __call__(
@@ -203,10 +221,8 @@ class ProteinMPNNLoss(LossTerm):
             # MPNN is cheap, let's call the decoder a few times to average over random decoding order
             # generate a decoding order
             # this should be random but end with the binder
-            decoding_order = (
-                jax.random.uniform(key, shape=(total_length,))
-                .at[:binder_length]
-                .add(2.0)
+            decoding_order = _build_decoding_order(
+                key, total_length, binder_length, self.scaffold_mask
             )
 
             logits = self.mpnn.decode(
@@ -240,6 +256,7 @@ def inverse_fold(
     key,
     jacobi_iterations: int = 10,
     bias: Float[Array, "N 20"] | None = None,
+    scaffold_mask: Bool[Array, "N"] | None = None,
 ):
     coords = output.backbone_coordinates
 
@@ -256,9 +273,7 @@ def inverse_fold(
         key=key,
     )
 
-    decoding_order = (
-        jax.random.uniform(key, shape=(total_length,)).at[:binder_length].add(2.0)
-    )
+    decoding_order = _build_decoding_order(key, total_length, binder_length, scaffold_mask)
 
     gumbel = jax.random.gumbel(key, (binder_length, 20))
 
@@ -312,6 +327,7 @@ class InverseFoldingSequenceRecovery(LossTerm):
     num_samples: int = 16
     jacobi_iterations: int = 10
     bias: Float[Array, "N 20"]  = None
+    scaffold_mask: Bool[Array, "N"] | None = None
     name: str = "sequence_recovery"
 
     def __call__(
@@ -329,7 +345,8 @@ class InverseFoldingSequenceRecovery(LossTerm):
                     temp=self.temp,
                     key=k,
                     jacobi_iterations=self.jacobi_iterations,
-                    bias = self.bias,
+                    bias=self.bias,
+                    scaffold_mask=self.scaffold_mask,
                 ),
                 20,
             )
@@ -356,7 +373,9 @@ class AllResiduePLLLoss(LossTerm):
 
     Decoding-order trick: a uniform base order in `[0, 1)` is offset by
     `+2.0` on binder positions (floats them past the target) and then the
-    target position is set to `4.0` so it decodes strictly last.
+    target position is set to `6.0` so it decodes strictly last. When a
+    scaffold_mask is provided, motif positions get `+2.0` and free positions
+    get `+4.0`, creating a 3-tier order: target → motif → free.
 
     `chunk_size` controls how many binder positions' decoder calls are
     vmapped together inside `jax.lax.map`. Larger = faster, more memory.
@@ -364,6 +383,7 @@ class AllResiduePLLLoss(LossTerm):
 
     mpnn: ProteinMPNN
     chunk_size: int = 10
+    scaffold_mask: Bool[Array, "N"] | None = None
     name: str = "pll"
 
     def __call__(
@@ -392,15 +412,14 @@ class AllResiduePLLLoss(LossTerm):
             key=encode_key,
         )
 
-        base_order = (
-            jax.random.uniform(order_key, (total_length,))
-            .at[:binder_length].add(2.0)
+        base_order = _build_decoding_order(
+            order_key, total_length, binder_length, self.scaffold_mask
         )
 
         @jax.checkpoint
         def per_position_pll(i):
             decoding_order = base_order.at[i].set(
-                jnp.asarray(4.0, dtype=base_order.dtype)
+                jnp.asarray(6.0, dtype=base_order.dtype)
             )
             log_p = self.mpnn.decode(
                 S=sequence_mpnn, h_V=h_V, h_E=h_E, E_idx=E_idx,
