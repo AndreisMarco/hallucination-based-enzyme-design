@@ -636,8 +636,8 @@ class AlphaFoldLoss(LossTerm):
             )
             return self.loss(PSSM, output=output, key=key)
 
-        vs, auxs = jax.lax.map(apply_loss_to_single_model, model_indices)
-        auxs = jax.tree.map(lambda v: jnp.mean(v, axis=0), auxs)
+        # vs, auxs = jax.lax.map(apply_loss_to_single_model, model_indices)
+        vs, auxs = jax.vmap(apply_loss_to_single_model)(model_indices)
 
         if self.features_to_log is None:
             feature_dict = {}
