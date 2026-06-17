@@ -475,10 +475,10 @@ if __name__ == "__main__":
     )
 
     structure_loss = (
-        RMSD.from_scaffold(scaffold=scaffold) +
-        RMSD.from_scaffold(scaffold=scaffold, mode="all_atom") +
-        RMSD.from_scaffold(scaffold=scaffold, weighted=True, name="wrmsd") +
-        RMSD.from_scaffold(scaffold=scaffold, mode="all_atom", weighted=True, name="wrmsd") +
+        RMSD.from_scaffold(scaffold=scaffold, name="rmsd_backbone") +
+        RMSD.from_scaffold(scaffold=scaffold, mode="all_atom", name="rmsd_all_atom") +
+        RMSD.from_scaffold(scaffold=scaffold, weighted=True, name="wrmsd_backbone") +
+        RMSD.from_scaffold(scaffold=scaffold, mode="all_atom", weighted=True, name="wrmsd_all_atom") +
         FAPE.from_scaffold(scaffold=scaffold) +
         DistogramCCE.from_scaffold(scaffold=scaffold) +
         MaskedPLDDTLoss.from_scaffold(scaffold=scaffold, name="scaffold_plddt") +
@@ -495,7 +495,7 @@ if __name__ == "__main__":
     for path, leaf in jax.tree.leaves_with_path(aux):
         print(f"{path}: {leaf}")
 
-    # --- verify that GT structure produces zero loss ---
+    # verify GT structure produces near zero loss
     print("\n--- zero-loss verification (GT as prediction) ---")
     gt_bb = np.array(scaffold.backbone_coordinates())
     gt_a37, gt_a37m = scaffold.atom37_coordinates()
