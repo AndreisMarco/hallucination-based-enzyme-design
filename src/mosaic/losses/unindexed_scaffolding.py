@@ -1,7 +1,8 @@
+import jax
 import jax.numpy as jnp
 import numpy as np
 
-from mosaic.common import restype_three_to_one, LossTerm
+from mosaic.common import restype_three_to_one, TOKENS, LossTerm
 from mosaic.losses.atom37 import ATOM37_INDEX
 from mosaic.util import gram_schmidt, kabsch
 from mosaic.structure_prediction import TargetChain, StructureModelOutput
@@ -237,6 +238,23 @@ class Scaffold:
     def __len__(self) -> int:
         return len(self._sequence)
 
+    def pssm(self, key) -> jnp.ndarray:
+        if self.mask is not None:
+            aa_indices = jnp.array([
+                TOKENS.index(aa) if aa in TOKENS else 0
+                for aa in self._sequence
+            ])
+            pssm = jax.random.gumbel(key, shape=(len(self), 20))
+            pssm = jax.nn.softmax(0.5 * pssm, axis=-1)
+            onehot = jax.nn.one_hot(aa_indices, num_classes=20)
+            return jnp.where(self.mask[:, None], onehot, pssm)
+        else:
+            aa_indices = jnp.array([
+                TOKENS.index(aa) if aa in TOKENS else 0
+                for aa in self._motif_sequence
+            ])
+            return jax.nn.one_hot(aa_indices, num_classes=20)
+
     def atom37_coordinates(self) -> tuple[jnp.ndarray, jnp.ndarray]:
         return self._atom37_coords, self._atom37_mask
 
@@ -304,6 +322,36 @@ class Scaffold:
         )
         return self.chain
 
+# ===========================================================================
+# Unindexed losses
+#
+# In indexed scaffolding, the motif positions in the designed protein are
+# known ahead of time (_idx), so losses just index into the prediction.
+#
+# In unindexed scaffolding, the motif placement is unknown. The loss must:
+#   1. Determine which M of the N predicted positions correspond to the
+#      M motif residues (the "assignment problem").
+#   2. Compare the predicted structure at those positions against the
+#      ground truth stored in the Scaffold.
+#   3. Return (loss_value, aux_dict) where aux_dict contains at least
+#      {self.name: loss_value}.
+#
+# Ground truth is available from the Scaffold via:
+#   scaffold.backbone_coordinates()  -> [M, 4, 3]  (N, CA, C, O)
+#   scaffold.backbone_frames()       -> ([M, 3], [M, 3, 3])  (t, R)
+#   scaffold.distogram()             -> [M, M]  (CB-CB distances)
+#   scaffold.atom37_coordinates()    -> ([M, 37, 3], [M, 37])
+#   scaffold.motif_sequence          -> str of length M
+#
+# The prediction (output) has shape [N, ...] where N = scaffold length:
+#   output.backbone_coordinates      -> [N, 4, 3]
+#
+# The sequence (pssm) has shape [N, 20].
+#
+# The call signature must stay: __call__(self, sequence, output, key)
+# to remain compatible with LossTerm composition via +.
+# ===========================================================================
+
 class RMSD(LossTerm):
     name: str = "rmsd"
     gt_: Float[Array, "K 3"]
@@ -321,16 +369,19 @@ class RMSD(LossTerm):
         output: StructureModelOutput,
         key,
     ):
-        raise NotImplementedError
+        raise NotImplementedError("You now need to implement your own loss here")
+        #return loss_value, {self.name: loss_value, "motif_idxs": [list of integers of current most likely scaffold positions]}
 
 
 if __name__ == "__main__":
+    jax.config.update("jax_platforms", "cpu")
     import argparse
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--theozyme_pdb", default="structures/theozyme.pdb")
     args = parser.parse_args()
     pdb_path = args.theozyme_pdb
+    key = jax.random.key(42)
 
     def print_scaffold(scaffold, label):
         print(f"\n{'='*60}")
@@ -339,6 +390,7 @@ if __name__ == "__main__":
         print("scaffold length:", len(scaffold))
         print("sequence:", scaffold.sequence)
         print("motif_sequence:", scaffold.motif_sequence)
+        print("motif pssm shape:", scaffold.pssm(key=key).shape)
         if scaffold.mask is not None:
             print("mask:", scaffold.mask)
             print("motif residues:", int(scaffold.mask.sum()))
@@ -377,4 +429,56 @@ if __name__ == "__main__":
     # --- Mode 6: indexed with target length ---
     s6 = Scaffold(pdb_path, loops=[10, 5, 5, 5, 10], length=50)
     print_scaffold(s6, "Indexed — auto-detect + loops + length=50")
+
+    # --- RMSD loss test ---
+    import jax
+    from types import SimpleNamespace
+
+    print(f"\n{'='*60}")
+    print(f"  RMSD loss test (unindexed scaffold)")
+    print(f"{'='*60}")
+
+    scaffold = Scaffold(pdb_path, length=100)
+    scaffold_length = len(scaffold)
+    n_motif = len(scaffold.motif_sequence)
+
+    np.random.seed(42)
+    pred_backbone_coords = np.random.normal(size=(scaffold_length, 4, 3))
+    pssm = np.random.normal(size=(scaffold_length, 20))
+
+    output = SimpleNamespace(
+        backbone_coordinates=pred_backbone_coords,
+    )
+
+    rmsd_loss = RMSD.from_scaffold(scaffold=scaffold)
+    v, aux = rmsd_loss(
+        sequence=pssm,
+        output=output,
+        key=jax.random.key(42),
+    )
+    print(f"RMSD (random pred): {v}")
+    print(f"aux: {aux}")
+
+    # --- zero-loss verification: GT backbone as prediction ---
+    print(f"\n{'='*60}")
+    print(f"  RMSD zero-loss verification (GT as prediction)")
+    print(f"{'='*60}")
+
+    gt_bb = np.array(scaffold.backbone_coordinates())  # [M, 4, 3]
+
+    gt_output = SimpleNamespace(
+        backbone_coordinates=gt_bb,
+    )
+    gt_pssm = np.zeros((scaffold_length, 20))
+    for i, aa in enumerate(scaffold.motif_sequence):
+        if aa in TOKENS:
+            gt_pssm[i, TOKENS.index(aa)] = 1.0
+
+    v_gt, aux_gt = rmsd_loss(
+        sequence=gt_pssm,
+        output=gt_output,
+        key=jax.random.key(42),
+    )
+    print(f"RMSD (GT pred): {v_gt}")
+    print(f"aux: {aux_gt}")
 
