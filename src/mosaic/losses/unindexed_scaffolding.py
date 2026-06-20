@@ -15,7 +15,7 @@ import gemmi
 
 
 class Scaffold:
-    def __init__(self, path_to_structure: str, scaffold_pos: str | None = None,
+    def __init__(self, path_to_structure: str, keep_intervals: str | None = None,
                  loops: list[int] | None = None, order: list[int] | None = None,
                  length: int | None = None):
         self.structure_path = str(path_to_structure)
@@ -33,8 +33,8 @@ class Scaffold:
 
         structure = structure[struct.filter_amino_acids(structure)]
 
-        if scaffold_pos is not None:
-            intervals = self._parse_intervals(scaffold_pos)
+        if keep_intervals is not None:
+            intervals = self._parse_intervals(keep_intervals)
             motif_res_ids = []
             motif_chain_ids = []
             ca_atoms = structure[structure.atom_name == "CA"]
@@ -56,7 +56,7 @@ class Scaffold:
         if n_motif == 0:
             raise ValueError(
                 "No motif residues found"
-                + (" in specified intervals" if scaffold_pos else " (no non-ALA residues)")
+                + (" in specified intervals" if keep_intervals else " (no non-ALA residues)")
             )
 
         def extract_residue(structure, cid, rid):
@@ -238,16 +238,14 @@ class Scaffold:
     def __len__(self) -> int:
         return len(self._sequence)
 
-    def pssm(self, key) -> jnp.ndarray:
+    def pssm(self) -> jnp.ndarray:
         if self.mask is not None:
             aa_indices = jnp.array([
                 TOKENS.index(aa) if aa in TOKENS else 0
                 for aa in self._sequence
             ])
-            pssm = jax.random.gumbel(key, shape=(len(self), 20))
-            pssm = jax.nn.softmax(0.5 * pssm, axis=-1)
             onehot = jax.nn.one_hot(aa_indices, num_classes=20)
-            return jnp.where(self.mask[:, None], onehot, pssm)
+            return jnp.where(self.mask[:, None], onehot, 0.0)
         else:
             aa_indices = jnp.array([
                 TOKENS.index(aa) if aa in TOKENS else 0
@@ -352,16 +350,19 @@ class Scaffold:
 # to remain compatible with LossTerm composition via +.
 # ===========================================================================
 
-class RMSD(LossTerm):
-    name: str = "rmsd"
-    gt_: Float[Array, "K 3"]
+class UnindexedRMSD(LossTerm):
+    gt_coords: Float[Array, "K 3"]
+    motif_pssm: Float[Array, "K 20"]
+    name: str = "unindexed_rmsd"
 
-    def __init__(self):
-        raise NotImplementedError
+    def __init__(self, gt_coords, motif_pssm, name: str = "unindexed_rmsd"):
+        self.name = name
+        self.gt_coords = gt_coords
+        self.motif_pssm = motif_pssm
 
     @classmethod
-    def from_scaffold(cls, scaffold: Scaffold, name: str="rmsd"):
-        raise NotImplementedError
+    def from_scaffold(cls, scaffold: Scaffold, name: str="unindexed_rmsd"):
+        return cls(gt_coords=scaffold.backbone_coordinates(), motif_pssm=scaffold.pssm(), name=name)
 
     def __call__(
         self,
@@ -369,8 +370,10 @@ class RMSD(LossTerm):
         output: StructureModelOutput,
         key,
     ):
-        raise NotImplementedError("You now need to implement your own loss here")
-        #return loss_value, {self.name: loss_value, "motif_idxs": [list of integers of current most likely scaffold positions]}
+        # rmsd = <-- your rmsd computation
+        loss_value=11.037
+        motif_idxs = jnp.array([2, 3, 4])
+        return loss_value, {self.name: loss_value, "motif_idxs": motif_idxs}
 
 
 if __name__ == "__main__":
@@ -390,7 +393,7 @@ if __name__ == "__main__":
         print("scaffold length:", len(scaffold))
         print("sequence:", scaffold.sequence)
         print("motif_sequence:", scaffold.motif_sequence)
-        print("motif pssm shape:", scaffold.pssm(key=key).shape)
+        print("motif pssm shape:", scaffold.pssm().shape)
         if scaffold.mask is not None:
             print("mask:", scaffold.mask)
             print("motif residues:", int(scaffold.mask.sum()))
@@ -409,12 +412,12 @@ if __name__ == "__main__":
     s1 = Scaffold(pdb_path, length=100)
     print_scaffold(s1, "Unindexed — auto-detect non-ALA, length=100")
 
-    # --- Mode 2: unindexed, explicit scaffold_pos ---
-    s2 = Scaffold(pdb_path, scaffold_pos="56, 58, 84, 114", length=100)
+    # --- Mode 2: unindexed, explicit keep_intervals ---
+    s2 = Scaffold(pdb_path, keep_intervals="56, 58, 84, 114", length=100)
     print_scaffold(s2, "Unindexed — explicit positions (56, 58, 84, 114), length=100")
 
-    # --- Mode 3: unindexed, scaffold_pos with ranges ---
-    s3 = Scaffold(pdb_path, scaffold_pos="56-58, 84, 114", length=100)
+    # --- Mode 3: unindexed, keep_intervals with ranges ---
+    s3 = Scaffold(pdb_path, keep_intervals="56-58, 84, 114", length=100)
     print_scaffold(s3, "Unindexed — mixed ranges (56-58, 84, 114), length=100")
 
     # --- Mode 4: indexed, auto-detect motif + loops (sequential order) ---
@@ -422,7 +425,7 @@ if __name__ == "__main__":
     print_scaffold(s4, "Indexed — auto-detect + loops [10,5,5,5,10]")
 
     # --- Mode 5: indexed, explicit positions + loops + reorder ---
-    s5 = Scaffold(pdb_path, scaffold_pos="56, 58, 84, 114",
+    s5 = Scaffold(pdb_path, keep_intervals="56, 58, 84, 114",
                   loops=[10, 5, 5, 5, 10], order=[3, 1, 2, 0])
     print_scaffold(s5, "Indexed — explicit + loops + order [3,1,2,0]")
 
@@ -450,7 +453,7 @@ if __name__ == "__main__":
         backbone_coordinates=pred_backbone_coords,
     )
 
-    rmsd_loss = RMSD.from_scaffold(scaffold=scaffold)
+    rmsd_loss = UnindexedRMSD.from_scaffold(scaffold=scaffold)
     v, aux = rmsd_loss(
         sequence=pssm,
         output=output,

@@ -330,7 +330,10 @@ class TrajectoryLogger:
         # Save plot of losses
         if save_loss_plot:
             flat = self.to_flat_dict()
-            losses_dict = {k: v for k,v in flat.items() if "losses" in k}
+            losses_dict = {
+                k: v for k, v in flat.items()
+                if "losses" in k and isinstance(v, np.ndarray) and v.ndim <= 2
+            }
             fig = plot_losses(
                 loss=self.trajectory["optim"]["loss"],
                 additional_losses=losses_dict,
