@@ -2,6 +2,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+import equinox as eqx
+
 from mosaic.common import restype_three_to_one, TOKENS, LossTerm
 from mosaic.losses.atom37 import ATOM37_INDEX
 from mosaic.util import gram_schmidt, kabsch
@@ -351,18 +353,57 @@ class Scaffold:
 # ===========================================================================
 
 class UnindexedRMSD(LossTerm):
-    gt_coords: Float[Array, "K 3"]
-    motif_pssm: Float[Array, "K 20"]
+    gt_coords: Float[Array, "M 4 3"]
+    motif_pssm: Float[Array, "M 20"]
+    assignment: Float[Array, "N M"] | None
+    _mode: str
+    _gt_atom37_coords: Float[Array, "M 37 3"] | None
+    _gt_atom37_mask: Float[Array, "M 37"] | None
+    _atom_idx: Array | None
+    _gt_flat: Float[Array, "n_atoms 3"] | None
     name: str = "unindexed_rmsd"
 
-    def __init__(self, gt_coords, motif_pssm, name: str = "unindexed_rmsd"):
+    def __init__(self, gt_coords, motif_pssm, assignment=None,
+                 name: str = "unindexed_rmsd", mode: str = "ca_only",
+                 gt_atom37_coords=None, gt_atom37_mask=None):
         self.name = name
         self.gt_coords = gt_coords
         self.motif_pssm = motif_pssm
+        self.assignment = assignment
+        self._mode = mode
+        self._gt_atom37_coords = gt_atom37_coords
+        self._gt_atom37_mask = gt_atom37_mask
+
+        if mode == "all_atom":
+            flat_mask = gt_atom37_mask.reshape(-1)
+            n_atoms = int(flat_mask.sum())
+            self._atom_idx = jnp.where(flat_mask, size=n_atoms)[0]
+            self._gt_flat = gt_atom37_coords.reshape(-1, 3)[self._atom_idx]
+        else:
+            self._atom_idx = None
+            self._gt_flat = None
 
     @classmethod
-    def from_scaffold(cls, scaffold: Scaffold, name: str="unindexed_rmsd"):
-        return cls(gt_coords=scaffold.backbone_coordinates(), motif_pssm=scaffold.pssm(), name=name)
+    def from_scaffold(cls, scaffold: Scaffold, name: str = "unindexed_rmsd",
+                      mode: str = "ca_only"):
+        assert mode in ("ca_only", "all_atom"), \
+            f"Unknown UnindexedRMSD mode {mode}, available: ca_only, all_atom"
+        if mode == "all_atom":
+            a37_coords, a37_mask = scaffold.atom37_coordinates()
+            return cls(
+                gt_coords=scaffold.backbone_coordinates(),
+                motif_pssm=scaffold.pssm(),
+                name=name,
+                mode=mode,
+                gt_atom37_coords=a37_coords,
+                gt_atom37_mask=a37_mask,
+            )
+        return cls(
+            gt_coords=scaffold.backbone_coordinates(),
+            motif_pssm=scaffold.pssm(),
+            name=name,
+            mode=mode,
+        )
 
     def __call__(
         self,
@@ -370,10 +411,54 @@ class UnindexedRMSD(LossTerm):
         output: StructureModelOutput,
         key,
     ):
-        # rmsd = <-- your rmsd computation
-        loss_value=11.037
-        motif_idxs = jnp.array([2, 3, 4])
-        return loss_value, {self.name: loss_value, "motif_idxs": motif_idxs}
+        assignment = self.assignment
+
+        # Cα RMSD — always valid, even with soft assignment
+        pred_ca = jnp.einsum("nm,nd->md", assignment, output.backbone_coordinates[:, 1, :])
+        gt_ca = self.gt_coords[:, 1, :]
+        R, t = kabsch(pred_ca, gt_ca)
+        aligned_ca = pred_ca @ R + t
+        rmsd_ca = jnp.sqrt(jnp.mean(jnp.sum((aligned_ca - gt_ca) ** 2, axis=-1)))
+
+        aux = {self.name: rmsd_ca, "motif_rmsd_ca": rmsd_ca}
+
+        # All-atom RMSD — metric only (no gradient). Uses hard argmax so
+        # atom37 slots correspond correctly. Only meaningful once assignment
+        # is sharp and seq_ce has pushed the correct amino acid identity.
+        if self._mode == "all_atom":
+            motif_idxs = jnp.argmax(assignment, axis=0)
+            pred_a37 = output.atom37_coords[motif_idxs]
+            pred_flat = pred_a37.reshape(-1, 3)[self._atom_idx]
+            R_aa, t_aa = kabsch(pred_flat, self._gt_flat)
+            aligned_aa = pred_flat @ R_aa + t_aa
+            rmsd_aa = jnp.sqrt(jnp.mean(jnp.sum((aligned_aa - self._gt_flat) ** 2, axis=-1)))
+            aux["motif_rmsd_all_atom"] = jax.lax.stop_gradient(rmsd_aa)
+
+        seq_probs = jax.nn.softmax(sequence, axis=-1)
+        assigned_seq = jnp.einsum("nm,na->ma", assignment, seq_probs)
+        seq_ce = -(self.motif_pssm * jnp.log(assigned_seq + 1e-10)).sum(axis=-1).mean()
+
+        row_sums = assignment.sum(axis=1)
+        collision = jnp.sum(jax.nn.relu(row_sums - 1.0))
+
+        motif_idxs = jnp.argmax(assignment, axis=0)
+        aux.update({
+            "motif_seq_ce": seq_ce,
+            "motif_collision": collision,
+            "motif_idxs": motif_idxs,
+        })
+        return rmsd_ca + seq_ce + collision, aux
+
+
+def set_assignment(loss, assignment):
+    """Set assignment on all UnindexedRMSD instances in a composed loss tree."""
+    def update(leaf):
+        if isinstance(leaf, UnindexedRMSD):
+            return eqx.tree_at(lambda l: l.assignment, leaf, assignment)
+        return leaf
+    return jax.tree.map(
+        update, loss, is_leaf=lambda x: isinstance(x, UnindexedRMSD)
+    )
 
 
 if __name__ == "__main__":
