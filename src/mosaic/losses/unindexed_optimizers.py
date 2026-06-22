@@ -25,6 +25,32 @@ from mosaic.optimizers import (
 )
 
 
+def _extract_aux_field(aux, field_name):
+    """Extract a named field from the aux tree, handling model-wrapped aux.
+
+    Model losses wrap structure aux as {"model_name": {"losses": [aux1, aux2, ...]}}.
+    The vmap over models adds a leading batch dim to each value.
+    """
+    if isinstance(aux, dict):
+        if field_name in aux:
+            v = np.array(aux[field_name])
+            return v[0] if v.ndim > 1 else v
+        for val in aux.values():
+            result = _extract_aux_field(val, field_name)
+            if result is not None:
+                return result
+    elif isinstance(aux, (list, tuple)):
+        for item in aux:
+            result = _extract_aux_field(item, field_name)
+            if result is not None:
+                return result
+    return None
+
+
+def _extract_geo_motif_idxs(aux):
+    return _extract_aux_field(aux, "geo_motif_idxs")
+
+
 def _normalize_gradient(g, max_gradient_norm=None):
     g = np.array(g, dtype=np.float32)
     g_norm = np.linalg.norm(g, axis=(-1, -2), keepdims=True)
@@ -72,6 +98,9 @@ def unindexed_colabdesign_optimizer(
     n_steps: int,
     learning_rate: float = 0.1,
     assign_learning_rate: float | None = None,
+    geo_learning_rate: float = 0.0,
+    assign_vote_learning_rate: float = 0.0,
+    commit_threshold: float | None = None,
     alpha: float = 2.0,
     temp: float = 1.0,
     e_temp: float = 0.01,
@@ -89,6 +118,7 @@ def unindexed_colabdesign_optimizer(
     patience: int | None = None,
     log_trajectory: bool = False,
     on_step: Callable | None = None,
+    frozen_positions: list[int] | None = None,
 ):
     """ColabDesign optimizer with co-optimized assignment matrix.
 
@@ -103,6 +133,11 @@ def unindexed_colabdesign_optimizer(
         n_steps: Total optimization steps.
         learning_rate: Base LR for PSSM.
         assign_learning_rate: Base LR for assignment (defaults to learning_rate).
+        assign_vote_learning_rate: LR for assignment-based top-k RMSD vote signal.
+        commit_threshold: Assignment entropy threshold for commitment. When mean
+            column entropy drops below this and all argmax positions are unique,
+            snap assignment to one-hot and freeze it for the remaining steps.
+            None (default) disables commitment.
         alpha: Logit scaling factor for PSSM.
         temp / e_temp: PSSM temperature schedule (quadratic decay).
         soft / e_soft: Soft blending schedule (linear).
@@ -142,6 +177,7 @@ def unindexed_colabdesign_optimizer(
         logger = TrajectoryLogger()
 
     iterations_since_improvement = 0
+    committed = False
 
     for i in range(n_steps):
         start_time = time.time()
@@ -176,10 +212,63 @@ def unindexed_colabdesign_optimizer(
             g_pssm = np.array(g_pssm, dtype=np.float32)
             g_assign = np.array(g_assign, dtype=np.float32)
 
+        if frozen_positions is not None:
+            g_pssm[frozen_positions] = 0.0
+
         key = jax.random.fold_in(key, 0)
 
         pssm_params = np.array(pssm_params - lr_pssm_i * g_pssm, dtype=np.float32)
-        assign_params = np.array(assign_params - lr_assign_i * g_assign, dtype=np.float32)
+
+        if not committed:
+            assign_params = np.array(assign_params - lr_assign_i * g_assign, dtype=np.float32)
+
+            # Geometric vote: increment logits at positions found by distogram matching
+            if geo_learning_rate > 0:
+                geo_idxs = _extract_geo_motif_idxs(aux)
+                if geo_idxs is not None:
+                    geo_idxs = np.array(geo_idxs, dtype=int)
+                    M = assign_params.shape[1]
+                    geo_vote = np.zeros_like(assign_params)
+                    for m_idx in range(M):
+                        geo_vote[geo_idxs[m_idx], m_idx] = 1.0
+                    assign_params = np.array(
+                        assign_params + geo_learning_rate * geo_vote, dtype=np.float32
+                    )
+
+            # Assignment vote: increment logits at positions found by top-k RMSD enumeration
+            if assign_vote_learning_rate > 0:
+                assign_idxs = _extract_aux_field(aux, "assign_motif_idxs")
+                if assign_idxs is not None:
+                    assign_idxs = np.array(assign_idxs, dtype=int)
+                    M = assign_params.shape[1]
+                    assign_vote = np.zeros_like(assign_params)
+                    for m_idx in range(M):
+                        assign_vote[assign_idxs[m_idx], m_idx] = 1.0
+                    assign_params = np.array(
+                        assign_params + assign_vote_learning_rate * assign_vote, dtype=np.float32
+                    )
+
+            # Commitment: snap assignment to one-hot when entropy is low enough
+            # and all argmax positions are unique
+            if commit_threshold is not None:
+                assign_probs_check = jax.nn.softmax(
+                    jnp.array(assign_params) / assign_temp_i, axis=0
+                )
+                col_entropy = float(
+                    -(assign_probs_check * jnp.log(assign_probs_check + 1e-10))
+                    .sum(axis=0).mean()
+                )
+                argmax_idxs = np.argmax(assign_params, axis=0)
+                all_unique = len(set(argmax_idxs.tolist())) == len(argmax_idxs)
+                if col_entropy < commit_threshold and all_unique:
+                    M = assign_params.shape[1]
+                    committed_params = np.full_like(assign_params, -1e4)
+                    for m_idx in range(M):
+                        committed_params[argmax_idxs[m_idx], m_idx] = 1e4
+                    assign_params = committed_params
+                    committed = True
+                    print(f"  [commit] step {i}: assignment locked at positions "
+                          f"{argmax_idxs.tolist()} (entropy={col_entropy:.4f})")
 
         value = float(value)
         if value < best_val and not np.isnan(value):
@@ -210,6 +299,7 @@ def unindexed_colabdesign_optimizer(
             "lr": lr_pssm_i,
             "grad_norm": g_pssm_raw,
             "grad_norm_assign": g_assign_raw,
+            "committed": float(committed),
             "time": time.time() - start_time,
             "pssm": clean_pssm(pssm_probs, loss_function),
             "assign": np.array(assign_probs),

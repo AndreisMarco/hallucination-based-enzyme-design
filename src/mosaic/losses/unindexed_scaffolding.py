@@ -450,15 +450,320 @@ class UnindexedRMSD(LossTerm):
         return rmsd_ca + seq_ce + collision, aux
 
 
+def _find_best_assignment_positions(assignment, pred_ca, gt_ca, top_k):
+    """Find best motif positions by enumerating top-K from the assignment matrix.
+
+    For each motif residue m, takes the top-K positions by assignment weight,
+    enumerates all K^M combinations, computes Kabsch-aligned RMSD for each,
+    and returns the best combination.
+
+    Args:
+        assignment: [N, M] soft assignment matrix (probabilities, axis=0 sums to 1).
+        pred_ca: [N, 3] predicted CA coordinates.
+        gt_ca: [M, 3] ground truth motif CA coordinates.
+        top_k: number of candidates per motif residue.
+
+    Returns:
+        best_idxs: [M] indices into the N design positions.
+        best_rmsd: scalar, RMSD of the best combination.
+    """
+    M = assignment.shape[1]
+
+    topk_indices = []
+    for m in range(M):
+        _, idx = jax.lax.top_k(assignment[:, m], top_k)
+        topk_indices.append(idx)
+    topk_indices = jnp.stack(topk_indices, axis=1)  # [K, M]
+
+    from itertools import product as _product
+    combo_local = jnp.array(list(_product(*[range(top_k)] * M)))  # [K^M, M]
+    candidates = jnp.stack(
+        [topk_indices[combo_local[:, m], m] for m in range(M)], axis=-1
+    )  # [K^M, M]
+
+    def _eval_rmsd(idxs):
+        sel = pred_ca[idxs]
+        R, t = kabsch(sel, gt_ca)
+        aligned = sel @ R + t
+        sq_dev = jnp.sum((aligned - gt_ca) ** 2, axis=-1)
+        pair_eq = idxs[:, None] == idxs[None, :]
+        n_dupes = (pair_eq.sum() - M) // 2
+        return jnp.sqrt(jnp.mean(sq_dev)) + n_dupes * 1e6
+
+    rmsds = jax.vmap(_eval_rmsd)(candidates)
+    best_idx = jnp.argmin(rmsds)
+    return candidates[best_idx], rmsds[best_idx]
+
+
+def _compute_cb_coords(atom37_coords, atom37_mask):
+    """Extract CB coordinates with CA fallback for glycine."""
+    ca = atom37_coords[:, ATOM37_INDEX["CA"], :]
+    cb = atom37_coords[:, ATOM37_INDEX["CB"], :]
+    has_cb = atom37_mask[:, ATOM37_INDEX["CB"]].astype(bool)
+    return jnp.where(has_cb[:, None], cb, ca)
+
+
+def _pairwise_distances(coords):
+    """Compute pairwise Euclidean distance matrix [N, N] from coords [N, 3]."""
+    diff = coords[:, None, :] - coords[None, :, :]
+    return jnp.linalg.norm(diff + 1e-10, axis=-1)
+
+
+def _find_best_positions(pred_dist, gt_dist, top_k):
+    """Find M design positions whose internal geometry best matches the GT motif.
+
+    Uses anchor-based sequential search: tries all N positions as motif 0,
+    then for each, narrows candidates for motif 1 by distance matching, etc.
+    Total candidates: N * K^(M-1), evaluated via the full [M, M] sub-distogram.
+
+    Args:
+        pred_dist: [N, N] predicted CB/CA pairwise distances.
+        gt_dist: [M, M] ground truth motif distogram.
+        top_k: candidates retained per motif at each expansion level.
+
+    Returns:
+        motif_idxs: [M] indices into the N design positions.
+    """
+    N = pred_dist.shape[0]
+    M = gt_dist.shape[0]
+
+    # Build candidates level by level.
+    # Level 0: all N positions are candidates for motif 0.
+    # Level m: for each partial assignment [n_cand, m], find top-K positions
+    # for motif m by matching pred distances to already-assigned positions.
+    partial = jnp.arange(N)[:, None]  # [N, 1]
+
+    for m in range(1, M):
+        n_cand = partial.shape[0]
+
+        def _score_next(partial_row):
+            # Score all N positions as candidates for motif m given partial_row.
+            # Error = sum of |pred_dist[assigned_j, n] - gt_dist[j, m]| for j < m.
+            assigned_dists = pred_dist[partial_row]  # [m, N]
+            gt_dists_to_m = gt_dist[:m, m]  # [m]
+            errors = jnp.abs(assigned_dists - gt_dists_to_m[:, None])  # [m, N]
+            total_error = errors.sum(axis=0)  # [N]
+            # Penalize already-assigned positions
+            total_error = total_error.at[partial_row].set(1e6)
+            return total_error
+
+        all_errors = jax.vmap(_score_next)(partial)  # [n_cand, N]
+        _, top_k_per_cand = jax.lax.top_k(-all_errors, top_k)  # [n_cand, K]
+
+        # Expand: [n_cand, m] → [n_cand * K, m+1]
+        partial_expanded = jnp.repeat(partial, top_k, axis=0)
+        new_col = top_k_per_cand.reshape(-1, 1)
+        partial = jnp.concatenate([partial_expanded, new_col], axis=1)
+
+    # partial: [N * K^(M-1), M] — all candidate assignments
+    # Evaluate each by full sub-distogram Frobenius norm
+    def _eval_candidate(cand_idxs):
+        sub_dist = pred_dist[cand_idxs][:, cand_idxs]
+        mismatch = jnp.sum((sub_dist - gt_dist) ** 2)
+        # Duplicate penalty
+        pair_eq = cand_idxs[:, None] == cand_idxs[None, :]
+        n_dupes = (pair_eq.sum() - M) // 2
+        return mismatch + n_dupes * 1e6
+
+    mismatches = jax.vmap(_eval_candidate)(partial)
+    best_idx = jnp.argmin(mismatches)
+    best_positions = partial[best_idx]
+
+    # The sequential search may assign motifs in the wrong order.
+    # Try all M! permutations to find the ordering that best matches GT.
+    from itertools import permutations
+    all_perms = jnp.array(list(permutations(range(M))))  # [M!, M]
+
+    def _eval_perm(perm):
+        reordered = best_positions[perm]
+        sub_dist = pred_dist[reordered][:, reordered]
+        return jnp.sum((sub_dist - gt_dist) ** 2)
+
+    perm_mismatches = jax.vmap(_eval_perm)(all_perms)
+    best_perm = all_perms[jnp.argmin(perm_mismatches)]
+    return best_positions[best_perm]
+
+
+class GeometricUnindexedRMSD(LossTerm):
+    """Hybrid unindexed scaffolding loss (Approach 1+2).
+
+    Combines geometric distogram matching (approach 2) with a persistent soft
+    assignment matrix (approach 1). Each forward pass:
+    1. Finds best geometric match via distogram → geo_motif_idxs (stop_gradient)
+    2. If assignment is set: uses soft assignment for differentiable RMSD + seq_ce
+       (approach 1), returns geo_motif_idxs in aux for the optimizer to use as a vote
+    3. If assignment is None: falls back to pure geometric mode (hard indices)
+    """
+    gt_coords: Float[Array, "M 4 3"]
+    gt_distogram: Float[Array, "M M"]
+    motif_pssm: Float[Array, "M 20"]
+    assignment: Float[Array, "N M"] | None
+    _mode: str
+    _gt_atom37_coords: Float[Array, "M 37 3"] | None
+    _gt_atom37_mask: Float[Array, "M 37"] | None
+    _atom_idx: Array | None
+    _gt_flat: Float[Array, "n_atoms 3"] | None
+    _top_k: int
+    _seq_ce_weight: float
+    _assign_top_k: int
+    name: str = "geometric_unindexed_rmsd"
+
+    def __init__(self, gt_coords, gt_distogram, motif_pssm, assignment=None,
+                 name: str = "geometric_unindexed_rmsd",
+                 mode: str = "ca_only", top_k: int = 15,
+                 seq_ce_weight: float = 10.0,
+                 assign_top_k: int = 0,
+                 gt_atom37_coords=None, gt_atom37_mask=None):
+        self.name = name
+        self.gt_coords = gt_coords
+        self.gt_distogram = gt_distogram
+        self.motif_pssm = motif_pssm
+        self.assignment = assignment
+        self._mode = mode
+        self._gt_atom37_coords = gt_atom37_coords
+        self._gt_atom37_mask = gt_atom37_mask
+        self._top_k = top_k
+        self._seq_ce_weight = seq_ce_weight
+        self._assign_top_k = assign_top_k
+
+        if mode == "all_atom":
+            flat_mask = gt_atom37_mask.reshape(-1)
+            n_atoms = int(flat_mask.sum())
+            self._atom_idx = jnp.where(flat_mask, size=n_atoms)[0]
+            self._gt_flat = gt_atom37_coords.reshape(-1, 3)[self._atom_idx]
+        else:
+            self._atom_idx = None
+            self._gt_flat = None
+
+    @classmethod
+    def from_scaffold(cls, scaffold: Scaffold, name: str = "geometric_unindexed_rmsd",
+                      mode: str = "ca_only", top_k: int = 15, seq_ce_weight: float = 10.0,
+                      assign_top_k: int = 0):
+        assert mode in ("ca_only", "all_atom"), \
+            f"Unknown GeometricUnindexedRMSD mode {mode}, available: ca_only, all_atom"
+
+        gt_distogram = scaffold.distogram()
+
+        if mode == "all_atom":
+            a37_coords, a37_mask = scaffold.atom37_coordinates()
+            return cls(
+                gt_coords=scaffold.backbone_coordinates(),
+                gt_distogram=gt_distogram,
+                motif_pssm=scaffold.pssm(),
+                name=name, mode=mode, top_k=top_k, seq_ce_weight=seq_ce_weight,
+                assign_top_k=assign_top_k,
+                gt_atom37_coords=a37_coords, gt_atom37_mask=a37_mask,
+            )
+        return cls(
+            gt_coords=scaffold.backbone_coordinates(),
+            gt_distogram=gt_distogram,
+            motif_pssm=scaffold.pssm(),
+            name=name, mode=mode, top_k=top_k, seq_ce_weight=seq_ce_weight,
+            assign_top_k=assign_top_k,
+        )
+
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: StructureModelOutput,
+        key,
+    ):
+        # Geometric position discovery (non-differentiable)
+        pred_cb = _compute_cb_coords(output.atom37_coords, output.atom37_mask)
+        pred_dist = _pairwise_distances(pred_cb)
+        geo_motif_idxs = jax.lax.stop_gradient(
+            _find_best_positions(pred_dist, self.gt_distogram, self._top_k)
+        )
+
+        if self.assignment is not None:
+            # HYBRID MODE: soft assignment for differentiable losses
+            assignment = self.assignment
+            pred_ca = jnp.einsum("nm,nd->md", assignment, output.backbone_coordinates[:, 1, :])
+            gt_ca = self.gt_coords[:, 1, :]
+            R, t = kabsch(pred_ca, gt_ca)
+            aligned_ca = pred_ca @ R + t
+            rmsd_ca = jnp.sqrt(jnp.mean(jnp.sum((aligned_ca - gt_ca) ** 2, axis=-1)))
+
+            seq_probs = jax.nn.softmax(sequence, axis=-1)
+            assigned_seq = jnp.einsum("nm,na->ma", assignment, seq_probs)
+            seq_ce = -(self.motif_pssm * jnp.log(assigned_seq + 1e-10)).sum(axis=-1).mean()
+
+            row_sums = assignment.sum(axis=1)
+            collision = jnp.sum(jax.nn.relu(row_sums - 1.0))
+
+            motif_idxs = jnp.argmax(assignment, axis=0)
+            # Gate seq_ce by assignment sharpness: off during exploration
+            # (uniform → max≈1/N), full strength once positions commit (max≈1)
+            sharpness = jnp.max(assignment, axis=0).mean()
+            seq_ce_gate = jnp.clip((sharpness - 0.1) / 0.4, 0.0, 1.0)
+            loss = rmsd_ca + self._seq_ce_weight * seq_ce_gate * seq_ce + collision
+        else:
+            # PURE GEOMETRIC MODE: hard indices (for reprediction / standalone)
+            motif_idxs = geo_motif_idxs
+            pred_ca = output.backbone_coordinates[motif_idxs, 1, :]
+            gt_ca = self.gt_coords[:, 1, :]
+            R, t = kabsch(pred_ca, gt_ca)
+            aligned_ca = pred_ca @ R + t
+            rmsd_ca = jnp.sqrt(jnp.mean(jnp.sum((aligned_ca - gt_ca) ** 2, axis=-1)))
+
+            seq_probs = jax.nn.softmax(sequence, axis=-1)
+            pred_seq = seq_probs[motif_idxs]
+            seq_ce = -(self.motif_pssm * jnp.log(pred_seq + 1e-10)).sum(axis=-1).mean()
+
+            collision = jnp.float32(0.0)
+            loss = rmsd_ca + self._seq_ce_weight * seq_ce
+
+        aux = {self.name: rmsd_ca, "motif_rmsd_ca": rmsd_ca}
+
+        # All-atom RMSD metric (stop_gradient, uses hard indices from assignment or geo)
+        if self._mode == "all_atom":
+            aa_idxs = motif_idxs
+            pred_a37 = output.atom37_coords[aa_idxs]
+            pred_flat = pred_a37.reshape(-1, 3)[self._atom_idx]
+            R_aa, t_aa = kabsch(pred_flat, self._gt_flat)
+            aligned_aa = pred_flat @ R_aa + t_aa
+            rmsd_aa = jnp.sqrt(jnp.mean(jnp.sum((aligned_aa - self._gt_flat) ** 2, axis=-1)))
+            aux["motif_rmsd_all_atom"] = jax.lax.stop_gradient(rmsd_aa)
+
+        # Distogram mismatch at geometric match (for logging)
+        geo_sub_dist = pred_dist[geo_motif_idxs][:, geo_motif_idxs]
+        distogram_mismatch = jnp.sqrt(jnp.mean((geo_sub_dist - self.gt_distogram) ** 2))
+
+        aux.update({
+            "motif_seq_ce": seq_ce,
+            "motif_collision": collision,
+            "motif_distogram_mismatch": distogram_mismatch,
+            "motif_idxs": motif_idxs,
+            "geo_motif_idxs": geo_motif_idxs,
+        })
+
+        if self._assign_top_k > 0 and self.assignment is not None:
+            assign_best_idxs, assign_best_rmsd = jax.lax.stop_gradient(
+                _find_best_assignment_positions(
+                    self.assignment,
+                    output.backbone_coordinates[:, 1, :],
+                    self.gt_coords[:, 1, :],
+                    self._assign_top_k,
+                )
+            )
+            aux["assign_motif_idxs"] = assign_best_idxs
+            aux["assign_motif_rmsd"] = assign_best_rmsd
+
+        return loss, aux
+
+
 def set_assignment(loss, assignment):
-    """Set assignment on all UnindexedRMSD instances in a composed loss tree."""
+    """Set assignment on all unindexed loss instances in a composed loss tree."""
+    def _is_unindexed(x):
+        return isinstance(x, (UnindexedRMSD, GeometricUnindexedRMSD))
     def update(leaf):
-        if isinstance(leaf, UnindexedRMSD):
-            return eqx.tree_at(lambda l: l.assignment, leaf, assignment)
+        if _is_unindexed(leaf):
+            return eqx.tree_at(
+                lambda l: l.assignment, leaf, assignment,
+                is_leaf=lambda x: x is None,
+            )
         return leaf
-    return jax.tree.map(
-        update, loss, is_leaf=lambda x: isinstance(x, UnindexedRMSD)
-    )
+    return jax.tree.map(update, loss, is_leaf=_is_unindexed)
 
 
 if __name__ == "__main__":
