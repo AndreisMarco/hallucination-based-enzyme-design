@@ -17,7 +17,11 @@ import numpy as np
 from jaxtyping import Array, Float
 
 from mosaic.logger import TrajectoryLogger
-from mosaic.losses.unindexed_scaffolding import set_assignment
+from mosaic.losses.unindexed_scaffolding import (
+    set_assignment,
+    set_seq_ce_weight,
+    set_use_all_atom_loss,
+)
 from mosaic.optimizers import (
     _print_iter,
     clean_pssm,
@@ -68,7 +72,9 @@ def _ste_argmax(x):
 
 @eqx.filter_jit
 def _eval_unindexed(loss, pssm_params, assign_params, key,
-                    alpha, temp, soft_weight, hard_weight, assign_temp):
+                    alpha, temp, soft_weight, hard_weight, assign_temp,
+                    freeze_assignment=False, seq_ce_weight=None,
+                    use_all_atom_loss=False):
     """Forward pass with separate PSSM and assignment gradients."""
     def forward(pssm_params, assign_params):
         scaled = pssm_params * alpha
@@ -77,9 +83,16 @@ def _eval_unindexed(loss, pssm_params, assign_params, key,
         pseudo = soft_weight * soft + (1 - soft_weight) * pssm_params
         pseudo = hard_weight * hard + (1 - hard_weight) * pseudo
 
-        assignment = jax.nn.softmax(assign_params / assign_temp, axis=0)
-        loss_with_assign = set_assignment(loss, assignment)
-        return loss_with_assign(pseudo, key=key)
+        if freeze_assignment:
+            assignment = jax.lax.stop_gradient(assign_params)
+        else:
+            assignment = jax.nn.softmax(assign_params / assign_temp, axis=0)
+        loss_modified = set_assignment(loss, assignment)
+        if seq_ce_weight is not None:
+            loss_modified = set_seq_ce_weight(loss_modified, seq_ce_weight)
+        if use_all_atom_loss:
+            loss_modified = set_use_all_atom_loss(loss_modified, True)
+        return loss_modified(pseudo, key=key)
 
     (v, aux), (g_pssm, g_assign) = jax.value_and_grad(
         forward, argnums=(0, 1), has_aux=True
@@ -119,6 +132,9 @@ def unindexed_colabdesign_optimizer(
     log_trajectory: bool = False,
     on_step: Callable | None = None,
     frozen_positions: list[int] | None = None,
+    freeze_assignment: bool = False,
+    seq_ce_weight: float | None = None,
+    use_all_atom_loss: bool = False,
 ):
     """ColabDesign optimizer with co-optimized assignment matrix.
 
@@ -177,7 +193,7 @@ def unindexed_colabdesign_optimizer(
         logger = TrajectoryLogger()
 
     iterations_since_improvement = 0
-    committed = False
+    committed = freeze_assignment
 
     for i in range(n_steps):
         start_time = time.time()
@@ -193,6 +209,7 @@ def unindexed_colabdesign_optimizer(
         lr_pssm_i = lr_pssm * lr_scale
         lr_assign_i = lr_assign * lr_scale
 
+        _seq_ce_kw = {} if seq_ce_weight is None else {"seq_ce_weight": jnp.float32(seq_ce_weight)}
         (value, aux), g_pssm, g_assign = _eval_unindexed(
             loss_function,
             jax.device_put(pssm_params),
@@ -200,6 +217,9 @@ def unindexed_colabdesign_optimizer(
             key, alpha,
             jnp.float32(temp_i), jnp.float32(soft_i),
             jnp.float32(hard_i), jnp.float32(assign_temp_i),
+            freeze_assignment=freeze_assignment,
+            use_all_atom_loss=use_all_atom_loss,
+            **_seq_ce_kw,
         )
 
         g_pssm_raw = float(np.linalg.norm(np.array(g_pssm, dtype=np.float32)))
@@ -280,7 +300,10 @@ def unindexed_colabdesign_optimizer(
             iterations_since_improvement += 1
 
         pssm_probs = jax.nn.softmax(jnp.array(pssm_params) * alpha / temp_i)
-        assign_probs = jax.nn.softmax(jnp.array(assign_params) / assign_temp_i, axis=0)
+        if freeze_assignment:
+            assign_probs = jnp.array(assign_params)
+        else:
+            assign_probs = jax.nn.softmax(jnp.array(assign_params) / assign_temp_i, axis=0)
 
         pssm_entropy = float(-(pssm_probs * jnp.log(pssm_probs + 1e-10)).sum(axis=-1).mean())
         assign_entropy = float(-(assign_probs * jnp.log(assign_probs + 1e-10)).sum(axis=0).mean())
