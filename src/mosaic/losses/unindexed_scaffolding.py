@@ -605,6 +605,7 @@ class GeometricUnindexedRMSD(LossTerm):
     _gt_flat: Float[Array, "n_atoms 3"] | None
     _top_k: int
     _seq_ce_weight: float
+    _use_all_atom_loss: bool
     _assign_top_k: int
     name: str = "geometric_unindexed_rmsd"
 
@@ -624,6 +625,7 @@ class GeometricUnindexedRMSD(LossTerm):
         self._gt_atom37_mask = gt_atom37_mask
         self._top_k = top_k
         self._seq_ce_weight = seq_ce_weight
+        self._use_all_atom_loss = False
         self._assign_top_k = assign_top_k
 
         if mode == "all_atom":
@@ -684,6 +686,15 @@ class GeometricUnindexedRMSD(LossTerm):
             aligned_ca = pred_ca @ R + t
             rmsd_ca = jnp.sqrt(jnp.mean(jnp.sum((aligned_ca - gt_ca) ** 2, axis=-1)))
 
+            if self._use_all_atom_loss and self._atom_idx is not None:
+                pred_a37 = jnp.einsum("nm,nad->mad", assignment, output.atom37_coords)
+                pred_flat = pred_a37.reshape(-1, 3)[self._atom_idx]
+                R_aa, t_aa = kabsch(pred_flat, self._gt_flat)
+                aligned_aa = pred_flat @ R_aa + t_aa
+                rmsd_loss = jnp.sqrt(jnp.mean(jnp.sum((aligned_aa - self._gt_flat) ** 2, axis=-1)))
+            else:
+                rmsd_loss = rmsd_ca
+
             seq_probs = jax.nn.softmax(sequence, axis=-1)
             assigned_seq = jnp.einsum("nm,na->ma", assignment, seq_probs)
             seq_ce = -(self.motif_pssm * jnp.log(assigned_seq + 1e-10)).sum(axis=-1).mean()
@@ -696,7 +707,7 @@ class GeometricUnindexedRMSD(LossTerm):
             # (uniform → max≈1/N), full strength once positions commit (max≈1)
             sharpness = jnp.max(assignment, axis=0).mean()
             seq_ce_gate = jnp.clip((sharpness - 0.1) / 0.4, 0.0, 1.0)
-            loss = rmsd_ca + self._seq_ce_weight * seq_ce_gate * seq_ce + collision
+            loss = rmsd_loss + self._seq_ce_weight * seq_ce_gate * seq_ce + collision
         else:
             # PURE GEOMETRIC MODE: hard indices (for reprediction / standalone)
             motif_idxs = geo_motif_idxs
@@ -764,6 +775,28 @@ def set_assignment(loss, assignment):
             )
         return leaf
     return jax.tree.map(update, loss, is_leaf=_is_unindexed)
+
+
+def set_seq_ce_weight(loss, seq_ce_weight):
+    """Set seq_ce_weight on all GeometricUnindexedRMSD instances in a loss tree."""
+    def _is_geo(x):
+        return isinstance(x, GeometricUnindexedRMSD)
+    def update(leaf):
+        if _is_geo(leaf):
+            return eqx.tree_at(lambda l: l._seq_ce_weight, leaf, seq_ce_weight)
+        return leaf
+    return jax.tree.map(update, loss, is_leaf=_is_geo)
+
+
+def set_use_all_atom_loss(loss, use_all_atom_loss: bool):
+    """Set _use_all_atom_loss on all GeometricUnindexedRMSD instances in a loss tree."""
+    def _is_geo(x):
+        return isinstance(x, GeometricUnindexedRMSD)
+    def update(leaf):
+        if _is_geo(leaf):
+            return eqx.tree_at(lambda l: l._use_all_atom_loss, leaf, use_all_atom_loss)
+        return leaf
+    return jax.tree.map(update, loss, is_leaf=_is_geo)
 
 
 if __name__ == "__main__":
