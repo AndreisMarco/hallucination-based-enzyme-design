@@ -92,32 +92,33 @@ def _build_protenix_atom37_table() -> np.ndarray:
 _TOKATOM_TO_ATOM37 = _build_protenix_atom37_table()
 
 
-def set_binder_sequence(new_sequence: Float[Array, "N 20"], features: PyTree):
+def set_binder_sequence(new_sequence: Float[Array, "N 20"], features: PyTree,
+                        restype_scale: float = 1.0, msa_fix: bool = False):
     binder_len = new_sequence.shape[0]
     protenix_sequence = new_sequence @ BOLTZ_TO_PROTENIX
+    scaled_sequence = protenix_sequence * restype_scale
     n_msa = features["msa"].shape[0]
     print("n_msa", n_msa)
 
     zero_msa_idx = 20  # GAP #31#20
     n_fake_seq = 1
 
-    # TODO: we may need to be more aggressive here and upweight the profile
-    # We assume there are no MSA hits for the binder sequence
     binder_profile = jnp.zeros_like(features["profile"][:binder_len])
     binder_profile = (
-        binder_profile.at[:binder_len].set(protenix_sequence) * n_fake_seq / n_msa
+        binder_profile.at[:binder_len].set(scaled_sequence) * n_fake_seq / n_msa
     )
     binder_profile = binder_profile.at[:, zero_msa_idx].set(
         (n_msa - n_fake_seq) / n_msa
     )
     features["restype"] = jnp.array(features["restype"])
     features["profile"] = jnp.array(features["profile"])
-    # binder_profile = protenix_sequence
-    return features | {
-        "restype": features["restype"].at[:binder_len, :].set(protenix_sequence),
-        # "msa": features["msa"].at[:, :binder_len].set(protenix_sequence.argmax(-1)),
+    result = features | {
+        "restype": features["restype"].at[:binder_len, :].set(scaled_sequence),
         "profile": features["profile"].at[:binder_len].set(binder_profile),
     }
+    if msa_fix:
+        result["soft_msa_row0"] = protenix_sequence
+    return result
 
 
 def get_trunk_state(
@@ -127,6 +128,7 @@ def get_trunk_state(
     initial_recycling_state: TrunkEmbedding | None,
     recycling_steps: int,
     key: jax.Array,
+    deterministic: bool = True,
 ) -> tuple[InitialEmbedding, TrunkEmbedding]:
     """ Compute trunk embedding."""
     # manual recycling
@@ -148,17 +150,18 @@ def get_trunk_state(
             model.layernorm_z_cycle(z)
         )
         if model.template_embedder.n_blocks > 0:
-            z = z + model.template_embedder(features, z, pair_mask=None, key=key)
+            z = z + model.template_embedder(features, z, pair_mask=None, key=key, deterministic=deterministic)
         z = model.msa_module(
             features,
             z,
             initial_embedding.s_inputs,
             pair_mask=None,
             key=key,
+            deterministic=deterministic,
         )
         s = initial_embedding.s_init + model.linear_no_bias_s(model.layernorm_s(s))
         s, z = model.pairformer_stack(
-            s, z, pair_mask=None, key=jax.random.fold_in(key, 1)
+            s, z, pair_mask=None, key=jax.random.fold_in(key, 1), deterministic=deterministic
         )
         return (iter + 1, TrunkEmbedding(s=s, z=z), jax.random.fold_in(key, 1))
 
@@ -183,6 +186,8 @@ def protenix_forward_from_trunk(
     sampling_steps: int,
     backward_steps: int | None = None,
     key: jax.Array = None,
+    confidence_stop_gradient: bool = False,
+    diffusion_stop_gradient: bool = False,
 ) -> StructureModelOutput:
     """Run distogram, structure, and confidence from pre-computed trunk state."""
     distogram_logits = model.distogram_head(trunk_state.z)
@@ -197,11 +202,31 @@ def protenix_forward_from_trunk(
         key=key,
     )
 
+    conf_coordinates = (
+        jax.lax.stop_gradient(structure_coordinates)
+        if diffusion_stop_gradient
+        else structure_coordinates
+    )
+
+    if confidence_stop_gradient:
+        conf_initial = InitialEmbedding(
+            s_inputs=jax.lax.stop_gradient(initial_embedding.s_inputs),
+            s_init=initial_embedding.s_init,
+            z_init=initial_embedding.z_init,
+        )
+        conf_trunk = TrunkEmbedding(
+            s=jax.lax.stop_gradient(trunk_state.s),
+            z=jax.lax.stop_gradient(trunk_state.z),
+        )
+    else:
+        conf_initial = initial_embedding
+        conf_trunk = trunk_state
+
     confidence = model.confidence_metrics(
-        initial_embedding=initial_embedding,
-        trunk_embedding=trunk_state,
+        initial_embedding=conf_initial,
+        trunk_embedding=conf_trunk,
         input_feature_dict=features,
-        coordinates=structure_coordinates,
+        coordinates=conf_coordinates,
         key=key,
     )
 
@@ -267,6 +292,11 @@ class MultiSampleProtenixLoss(LossTerm):
     name: str = "protenix"
     initial_recycling_state: TrunkEmbedding | None = None
     reduction: any = jnp.mean
+    restype_scale: float = 1.0
+    msa_fix: bool = False
+    confidence_stop_gradient: bool = False
+    diffusion_stop_gradient: bool = False
+    use_dropout: bool = False
     features_to_log: list[str] | None = None
 
     """
@@ -281,7 +311,9 @@ class MultiSampleProtenixLoss(LossTerm):
     def __call__(self, sequence: Float[Array, "N 20"], key):
         """Compute the loss for a given sequence."""
         # Set the binder sequence in the features
-        features = set_binder_sequence(sequence, self.features)
+        features = set_binder_sequence(sequence, self.features,
+                                      restype_scale=self.restype_scale,
+                                      msa_fix=self.msa_fix)
 
         # run trunk once
         initial_embedding, trunk_state = get_trunk_state(
@@ -290,6 +322,7 @@ class MultiSampleProtenixLoss(LossTerm):
             initial_recycling_state=self.initial_recycling_state,
             recycling_steps=self.recycling_steps,
             key=key,
+            deterministic=not self.use_dropout,
         )
 
         # initialize from trunk outputs using vmap
@@ -302,6 +335,8 @@ class MultiSampleProtenixLoss(LossTerm):
                 sampling_steps=self.sampling_steps,
                 backward_steps=self.backward_steps,
                 key=key,
+                confidence_stop_gradient=self.confidence_stop_gradient,
+                diffusion_stop_gradient=self.diffusion_stop_gradient,
             )
             v, aux = self.loss(
                 sequence=sequence,

@@ -168,6 +168,52 @@ class WithinBinderContact(LossTerm):
         return -average_log_prob, {self.name: average_log_prob}
 
 
+class ColabDesignContactLoss(LossTerm):
+    cutoff: float = 14.0
+    binary: bool = False
+    seqsep: int = 9
+    num: int = 2
+    num_pos: float = float("inf")
+    name: str = "con"
+
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: StructureModelOutput,
+        key,
+    ):
+        binder_len = sequence.shape[0]
+        dgram = output.distogram_logits[:binder_len, :binder_len]
+        bins = output.distogram_bins
+
+        bin_mask = (bins < self.cutoff).astype(jnp.float32)
+        px = jax.nn.softmax(dgram)
+        px_ = jax.nn.softmax(dgram - 1e7 * (1 - bin_mask))
+
+        if self.binary:
+            p = -jnp.log((bin_mask * px + 1e-8).sum(-1))
+        else:
+            p = -(px_ * jax.nn.log_softmax(dgram)).sum(-1)
+
+        idx = jnp.arange(binder_len)
+        seqsep_mask = jnp.abs(idx[:, None] - idx[None, :]) >= self.seqsep
+
+        p_masked = jnp.where(seqsep_mask, p, jnp.inf)
+        p_sorted = jnp.sort(p_masked, axis=-1)
+        k = min(self.num, binder_len)
+        k_mask = jnp.arange(p_sorted.shape[-1]) < k
+        per_res = jnp.where(k_mask, p_sorted, 0.0).sum(-1) / jnp.maximum(k_mask.sum(), 1)
+
+        if self.num_pos < binder_len:
+            per_res_sorted = jnp.sort(per_res)
+            n = int(self.num_pos)
+            con = per_res_sorted[:n].mean()
+        else:
+            con = per_res.mean()
+
+        return con, {self.name: con}
+
+
 class BinderTargetContact(LossTerm):
     paratope_idx: list[int] | None = None
     paratope_size: int | None = None
@@ -550,7 +596,7 @@ class ActualRadiusOfGyration(LossTerm):
         key,
     ):
         binder_len = sequence.shape[0]
-        first_atom_coords = output.backbone_coordinates[:binder_len, 0]
+        first_atom_coords = output.backbone_coordinates[:binder_len, 1]
         rg = jnp.sqrt(
             ((first_atom_coords - first_atom_coords.mean(0)) ** 2).sum(-1).mean()
         )

@@ -284,18 +284,20 @@ class FAPE(LossTerm):
     mask: Float[Array, "N"]
     _idx: Float[Array, "M"]
     name: str = "fape"
+    clamp: bool = False
 
-    def __init__(self, gt_t, gt_R, mask, name: str = "fape"):
+    def __init__(self, gt_t, gt_R, mask, name: str = "fape", clamp: bool = False):
         self.gt_t = gt_t
         self.gt_R = gt_R
         self.mask = mask
         self._idx = jnp.where(mask, size=int(mask.sum()))[0]
         self.name = name
+        self.clamp = clamp
 
     @classmethod
-    def from_scaffold(cls, scaffold: Scaffold, name: str = "fape"):
+    def from_scaffold(cls, scaffold: Scaffold, name: str = "fape", clamp: bool = False):
         gt_t, gt_R = scaffold.backbone_frames()
-        return cls(gt_t=gt_t, gt_R=gt_R, mask=scaffold.mask, name=name)
+        return cls(gt_t=gt_t, gt_R=gt_R, mask=scaffold.mask, name=name, clamp=clamp)
 
     def __call__(
         self,
@@ -325,7 +327,8 @@ class FAPE(LossTerm):
 
         # compute FAPE
         fape = robust_norm(pred_ij - gt_ij)
-        # fape = jnp.clip(fape, 0.0, 10.0) / 10.0
+        if self.clamp:
+            fape = jnp.clip(fape, 0.0, 10.0) / 10.0
         fape = fape.mean()
 
         return fape, {self.name: fape}
@@ -351,8 +354,11 @@ class RMSD(LossTerm):
         self._weights = None
 
         gt_scaffold = gt_coords[self._idx]
-        if mode == "all_atom":
+        if mode in ("all_atom", "side_chain"):
             mask37 = gt_atom37_mask[self._idx]             # [M, 37]
+            if mode == "side_chain":
+                backbone_idx = jnp.array([0, 2, 4])          # N, C, O (keep CA)
+                mask37 = mask37.at[:, backbone_idx].set(0.0)
             flat_mask = mask37.reshape(-1)
             # transform atom37 [M, 37, 3] to atom list [n_atoms, 3]
             n_atoms = int(flat_mask.sum())
@@ -376,9 +382,9 @@ class RMSD(LossTerm):
     @classmethod
     def from_scaffold(cls, scaffold: Scaffold, mode: str = "backbone",
                       weighted: bool = False, name: str = "rmsd"):
-        assert mode in ("ca_only", "backbone", "all_atom"), \
-            f"Unknown RMSD loss mode {mode}, available ca_only, backbone, all_atom"
-        if mode == "all_atom":
+        assert mode in ("ca_only", "backbone", "all_atom", "side_chain"), \
+            f"Unknown RMSD loss mode {mode}, available ca_only, backbone, all_atom, side_chain"
+        if mode in ("all_atom", "side_chain"):
             coords, atom37_mask = scaffold.atom37_coordinates()
             return cls(gt_coords=coords, mask=scaffold.mask, name=name,
                        mode=mode, weighted=weighted, gt_atom37_mask=atom37_mask)
@@ -391,7 +397,7 @@ class RMSD(LossTerm):
         output: StructureModelOutput,
         key,
     ):
-        if self._mode == "all_atom":
+        if self._mode in ("all_atom", "side_chain"):
             pred = output.atom37_coords[self._idx].reshape(-1, 3)[self._atom_idx]
         elif self._mode == "ca_only":
             pred = output.backbone_coordinates[self._idx, 1, :]

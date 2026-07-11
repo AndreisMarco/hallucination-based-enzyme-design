@@ -261,12 +261,12 @@ class Dropout(eqx.Module):
         if deterministic:
             return x
 
-        shape = x.shape
+        shape = list(x.shape)
         if self.batch_dim is not None:
             for bd in self.batch_dim:
                 shape[bd] = 1
 
-        bools = jax.random.bernoulli(key=key, p=self.rate, shape=shape)
+        bools = jax.random.bernoulli(key=key, p=1.0 - self.rate, shape=shape)
 
         return x * bools * (1 / (1 - self.rate))
 
@@ -809,28 +809,31 @@ class PairformerBlock(AbstractFromTorch):
     single_transition: Transition | None
     c_s: int
 
-    def __call__(self, *, s, z, pair_mask, key):
-        # TODO: Dropout?!
+    def __call__(self, *, s, z, pair_mask, key, deterministic=True):
+        k1, k2, k3, k4 = jax.random.split(key, 4)
         dtype = self.tri_mul_out.linear_a_p.weight.dtype
         z = z.astype(dtype)
         if s is not None:
             s = s.astype(dtype)
-        z += self.tri_mul_out(
-            z,
-            mask=pair_mask,
+        z += self.dropout_row(
+            self.tri_mul_out(z, mask=pair_mask),
+            key=k1, deterministic=deterministic,
         )
-        z += self.tri_mul_in(
-            z,
-            mask=pair_mask,
+        z += self.dropout_row(
+            self.tri_mul_in(z, mask=pair_mask),
+            key=k2, deterministic=deterministic,
         )
-        z += self.tri_att_start(
-            z,
-            mask=pair_mask,
+        z += self.dropout_row(
+            self.tri_att_start(z, mask=pair_mask),
+            key=k3, deterministic=deterministic,
         )
         z = jnp.swapaxes(z, -2, -3)
-        z += self.tri_att_end(
-            z,
-            mask=jnp.swapaxes(pair_mask, -1, -2) if pair_mask is not None else None,
+        z += self.dropout_row(
+            self.tri_att_end(
+                z,
+                mask=jnp.swapaxes(pair_mask, -1, -2) if pair_mask is not None else None,
+            ),
+            key=k4, deterministic=deterministic,
         )
         z = jnp.swapaxes(z, -2, -3)
         z += self.pair_transition(z)
@@ -863,14 +866,15 @@ class Pairformer(eqx.Module):
             static,
         )
 
-    def __call__(self, s, z, pair_mask, key):
+    def __call__(self, s, z, pair_mask, key, deterministic=True):
         @jax.checkpoint
         def body_fn(embedding, params):
             s, z, key = embedding
             s_dtype = s.dtype if s is not None else None
             z_dtype = z.dtype
+            key = jax.random.fold_in(key, 0)
             s, z = eqx.combine(self.static, params)(
-                s=s, z=z, pair_mask=pair_mask, key=key
+                s=s, z=z, pair_mask=pair_mask, key=key, deterministic=deterministic
             )
             return (s.astype(s_dtype) if s is not None else s, z.astype(z_dtype), key), None
 
@@ -972,11 +976,11 @@ class MSABlock(eqx.Module):
             pair_stack=from_torch(m.pair_stack),
         )
 
-    def __call__(self, m, z, pair_mask, *, key):
+    def __call__(self, m, z, pair_mask, *, key, deterministic=True):
         z = z + self.outer_product_mean_msa(m)
         if self.msa_stack is not None:
             m = self.msa_stack(m, z, key=key)
-        _, z = self.pair_stack(s=None, z=z, pair_mask=pair_mask, key=key)
+        _, z = self.pair_stack(s=None, z=z, pair_mask=pair_mask, key=key, deterministic=deterministic)
         return m, z
 
 
@@ -1015,7 +1019,7 @@ class MSAModule(eqx.Module):
     # See https://github.com/jax-ml/jax/issues/24398
     input_feature_keys_ordered: list[str]
 
-    def __call__(self, input_feature_dict: dict, z, s_inputs, pair_mask, *, key):
+    def __call__(self, input_feature_dict: dict, z, s_inputs, pair_mask, *, key, deterministic=True):
         if "msa" not in input_feature_dict:
             print("no msa in features")
             return z
@@ -1034,6 +1038,11 @@ class MSAModule(eqx.Module):
         )
 
         msa_feat["msa"] = jax.nn.one_hot(msa_feat["msa"], 32)
+        # inject soft representation as first sequence in msa, instead of one-hot
+        # --> allows for gradient propagation (similar to msa_fix in af2).
+        if "soft_msa_row0" in input_feature_dict:
+            soft_row = input_feature_dict["soft_msa_row0"]
+            msa_feat["msa"] = msa_feat["msa"].at[0, :soft_row.shape[0]].set(soft_row)
         target_shape = msa_feat["msa"].shape[:-1]
 
         msa_sample = jnp.concatenate(
@@ -1051,7 +1060,7 @@ class MSAModule(eqx.Module):
             m, z, key = carry
             key = jax.random.fold_in(key, 1)
             block = eqx.combine(self.block_static, params)
-            m, z = block(m, z, pair_mask, key=key)
+            m, z = block(m, z, pair_mask, key=key, deterministic=deterministic)
             return (m, z, key), None
 
         (_, z, _), _ = jax.lax.scan(
@@ -2010,7 +2019,7 @@ class TemplateEmbedder(AbstractFromTorch):
     relu: any
     linear_no_bias_u: Linear
 
-    def __call__(self, input_feature_dict, z, pair_mask=None, *, key):
+    def __call__(self, input_feature_dict, z, pair_mask=None, *, key, deterministic=True):
         if "template_aatype" not in input_feature_dict or self.n_blocks < 1:
             return jnp.zeros_like(z)
 
@@ -2065,7 +2074,7 @@ class TemplateEmbedder(AbstractFromTorch):
             ]
             at = jnp.concatenate(to_concat, axis=-1)
             v = self.linear_no_bias_z(z_normed) + self.linear_no_bias_a(at)
-            _, v = self.pairformer_stack(s=None, z=v, pair_mask=pair_mask, key=key)
+            _, v = self.pairformer_stack(s=None, z=v, pair_mask=pair_mask, key=key, deterministic=deterministic)
             v = self.layernorm_v(v)
             u = u + v
             return (u, key), None
@@ -2102,7 +2111,7 @@ class ConfidenceHead(AbstractFromTorch):
     plddt_ln: LayerNorm
     resolved_ln: LayerNorm
 
-    def __call__(self, *, input_feature_dict, s_inputs, s_trunk, z_trunk, pair_mask, x_pred_coords, key, use_embedding=True):
+    def __call__(self, *, input_feature_dict, s_inputs, s_trunk, z_trunk, pair_mask, x_pred_coords, key, use_embedding=True, deterministic=True):
         s_trunk = self.input_strunk_ln(jnp.clip(s_trunk, -512, 512))#torch.clamp(s_trunk, min=-512, max=512))
         z_trunk = use_embedding * z_trunk
 
@@ -2133,7 +2142,8 @@ class ConfidenceHead(AbstractFromTorch):
                 s=s_trunk,
                 z=z_pair,
                 pair_mask=pair_mask,
-                key=key)
+                key=key,
+                deterministic=deterministic)
 
             atom_to_token_idx = input_feature_dict[
             "atom_to_token_idx"
@@ -2260,7 +2270,7 @@ class Protenix(eqx.Module):
         )
 
     @eqx.filter_jit
-    def recycle(self, *, initial_embedding: InitialEmbedding, input_feature_dict, recycling_steps: int, key, state = None):
+    def recycle(self, *, initial_embedding: InitialEmbedding, input_feature_dict, recycling_steps: int, key, state = None, deterministic=True):
         if state is None:
             state = TrunkEmbedding(
                 s=jnp.zeros_like(initial_embedding.s_init),
@@ -2273,13 +2283,13 @@ class Protenix(eqx.Module):
             z = initial_embedding.z_init + self.linear_no_bias_z_cycle(self.layernorm_z_cycle(z))
             if self.template_embedder.n_blocks > 0:
                 z = z + self.template_embedder(
-                    input_feature_dict, z, pair_mask=None, key=key
+                    input_feature_dict, z, pair_mask=None, key=key, deterministic=deterministic
                 )
             z = self.msa_module(
-                input_feature_dict, z, initial_embedding.s_inputs, pair_mask=None, key=key
+                input_feature_dict, z, initial_embedding.s_inputs, pair_mask=None, key=key, deterministic=deterministic
             )
             s = initial_embedding.s_init + self.linear_no_bias_s(self.layernorm_s(s))
-            s, z = self.pairformer_stack(s, z, pair_mask=None, key=jax.random.fold_in(key, 1))
+            s, z = self.pairformer_stack(s, z, pair_mask=None, key=jax.random.fold_in(key, 1), deterministic=deterministic)
             return TrunkEmbedding(s=s, z=z), None
 
         state, _ = jax.lax.scan(

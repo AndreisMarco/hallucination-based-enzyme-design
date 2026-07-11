@@ -117,7 +117,12 @@ class Protenix(StructurePredictionModel):
         gradient_steps=None,
         name: str | None = None,
         initial_recycling_state=None,
-        features_to_log: list[str] | None = None
+        features_to_log: list[str] | None = None,
+        restype_scale: float = 1.0,
+        msa_fix: bool = False,
+        confidence_stop_gradient: bool = False,
+        diffusion_stop_gradient: bool = False,
+        use_dropout: bool = False,
     ):
         return self.build_multisample_loss(
             loss=loss,
@@ -128,7 +133,12 @@ class Protenix(StructurePredictionModel):
             name=name if name is not None else self.name,
             num_samples=1,
             initial_recycling_state=initial_recycling_state,
-            features_to_log=features_to_log
+            features_to_log=features_to_log,
+            restype_scale=restype_scale,
+            msa_fix=msa_fix,
+            confidence_stop_gradient=confidence_stop_gradient,
+            diffusion_stop_gradient=diffusion_stop_gradient,
+            use_dropout=use_dropout,
         )
 
     def build_multisample_loss(
@@ -143,7 +153,12 @@ class Protenix(StructurePredictionModel):
         name: str | None = None,
         reduction=jnp.mean,
         initial_recycling_state=None,
-        features_to_log: list[str] | None = None
+        features_to_log: list[str] | None = None,
+        restype_scale: float = 1.0,
+        msa_fix: bool = False,
+        confidence_stop_gradient: bool = False,
+        diffusion_stop_gradient: bool = False,
+        use_dropout: bool = False,
     ):
         if features_to_log is not None:
             not_found = [f for f in features_to_log if f not in features.keys()]
@@ -163,7 +178,12 @@ class Protenix(StructurePredictionModel):
             num_samples=num_samples,
             reduction=reduction,
             initial_recycling_state=initial_recycling_state,
-            features_to_log=features_to_log
+            features_to_log=features_to_log,
+            restype_scale=restype_scale,
+            msa_fix=msa_fix,
+            confidence_stop_gradient=confidence_stop_gradient,
+            diffusion_stop_gradient=diffusion_stop_gradient,
+            use_dropout=use_dropout,
         )
 
     @eqx.filter_jit
