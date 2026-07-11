@@ -1,0 +1,27 @@
+Config: N=100, M=4, K=15
+  Top-K candidates per approach: K^M = 15^4 = 50,625
+  Brute-force candidates: C(100,4) = 3,921,225
+  Timing over 200 calls each
+
+Approach 1a — Assignment Matrix (soft, no enumeration):
+  soft weighted RMSD: 0.011 ms/call  (200 calls)
+
+Approach 1b — Assignment Matrix (top-K enumeration, weighted RMSD):
+  K=15, 50,625 candidates: 9.827 ms/call  (200 calls)
+
+Approach 2a — Geometry-First (top-K distance matching):
+  K=15, 50,625 candidates: 9.218 ms/call  (200 calls)
+
+Approach 2b — Geometry-First (brute-force exhaustive):
+  C(100,4) = 3,921,225 candidates: 909.239 ms/call  (200 calls)
+
+Approach 3 — Sequence Top-K:
+  K=15, 50,625 candidates: 20.869 ms/call  (200 calls)
+
+============================================================
+Result verification (values from one call):
+  1a soft RMSD:        2.0297
+  1b enum weighted:    1.5572
+  2a geom top-K:       0.1220  indices=[45 14 41 12]
+  2b geom brute:       0.0986  indices=[ 9 26 27 60]
+  3  seq top-K:        0.4830  indices=[60 89 71 45]
