@@ -128,16 +128,17 @@ def _nan_like(value):
     return np.nan
 
 def _concat_pad(x, y):
-    """Concatenate along axis 0, padding trailing dimensions with NaN if mismatched."""
+    """Concatenate along axis 0, padding trailing dimensions if mismatched."""
     if x.shape[1:] == y.shape[1:]:
         return np.concatenate([x, y], axis=0)
     ndim = max(x.ndim, y.ndim)
     target_shape = tuple(max(x.shape[i] if i < x.ndim else 0, y.shape[i] if i < y.ndim else 0) for i in range(1, ndim))
+    fill = -1 if np.issubdtype(x.dtype, np.integer) else np.nan
     def _pad_to(arr, target):
         if arr.shape[1:] == target:
             return arr
         pad_widths = [(0, 0)] + [(0, t - s) for s, t in zip(arr.shape[1:], target)]
-        return np.pad(arr, pad_widths, mode="constant", constant_values=np.nan)
+        return np.pad(arr, pad_widths, mode="constant", constant_values=fill)
     return np.concatenate([_pad_to(x, target_shape), _pad_to(y, target_shape)], axis=0)
 
 

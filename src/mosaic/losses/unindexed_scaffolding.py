@@ -352,103 +352,6 @@ class Scaffold:
 # to remain compatible with LossTerm composition via +.
 # ===========================================================================
 
-class UnindexedRMSD(LossTerm):
-    gt_coords: Float[Array, "M 4 3"]
-    motif_pssm: Float[Array, "M 20"]
-    assignment: Float[Array, "N M"] | None
-    _mode: str
-    _gt_atom37_coords: Float[Array, "M 37 3"] | None
-    _gt_atom37_mask: Float[Array, "M 37"] | None
-    _atom_idx: Array | None
-    _gt_flat: Float[Array, "n_atoms 3"] | None
-    name: str = "unindexed_rmsd"
-
-    def __init__(self, gt_coords, motif_pssm, assignment=None,
-                 name: str = "unindexed_rmsd", mode: str = "ca_only",
-                 gt_atom37_coords=None, gt_atom37_mask=None):
-        self.name = name
-        self.gt_coords = gt_coords
-        self.motif_pssm = motif_pssm
-        self.assignment = assignment
-        self._mode = mode
-        self._gt_atom37_coords = gt_atom37_coords
-        self._gt_atom37_mask = gt_atom37_mask
-
-        if mode == "all_atom":
-            flat_mask = gt_atom37_mask.reshape(-1)
-            n_atoms = int(flat_mask.sum())
-            self._atom_idx = jnp.where(flat_mask, size=n_atoms)[0]
-            self._gt_flat = gt_atom37_coords.reshape(-1, 3)[self._atom_idx]
-        else:
-            self._atom_idx = None
-            self._gt_flat = None
-
-    @classmethod
-    def from_scaffold(cls, scaffold: Scaffold, name: str = "unindexed_rmsd",
-                      mode: str = "ca_only"):
-        assert mode in ("ca_only", "all_atom"), \
-            f"Unknown UnindexedRMSD mode {mode}, available: ca_only, all_atom"
-        if mode == "all_atom":
-            a37_coords, a37_mask = scaffold.atom37_coordinates()
-            return cls(
-                gt_coords=scaffold.backbone_coordinates(),
-                motif_pssm=scaffold.pssm(),
-                name=name,
-                mode=mode,
-                gt_atom37_coords=a37_coords,
-                gt_atom37_mask=a37_mask,
-            )
-        return cls(
-            gt_coords=scaffold.backbone_coordinates(),
-            motif_pssm=scaffold.pssm(),
-            name=name,
-            mode=mode,
-        )
-
-    def __call__(
-        self,
-        sequence: Float[Array, "N 20"],
-        output: StructureModelOutput,
-        key,
-    ):
-        assignment = self.assignment
-
-        # Cα RMSD — always valid, even with soft assignment
-        pred_ca = jnp.einsum("nm,nd->md", assignment, output.backbone_coordinates[:, 1, :])
-        gt_ca = self.gt_coords[:, 1, :]
-        R, t = kabsch(pred_ca, gt_ca)
-        aligned_ca = pred_ca @ R + t
-        rmsd_ca = jnp.sqrt(jnp.mean(jnp.sum((aligned_ca - gt_ca) ** 2, axis=-1)))
-
-        aux = {self.name: rmsd_ca, "motif_rmsd_ca": rmsd_ca}
-
-        # All-atom RMSD — metric only (no gradient). Uses hard argmax so
-        # atom37 slots correspond correctly. Only meaningful once assignment
-        # is sharp and seq_ce has pushed the correct amino acid identity.
-        if self._mode == "all_atom":
-            motif_idxs = jnp.argmax(assignment, axis=0)
-            pred_a37 = output.atom37_coords[motif_idxs]
-            pred_flat = pred_a37.reshape(-1, 3)[self._atom_idx]
-            R_aa, t_aa = kabsch(pred_flat, self._gt_flat)
-            aligned_aa = pred_flat @ R_aa + t_aa
-            rmsd_aa = jnp.sqrt(jnp.mean(jnp.sum((aligned_aa - self._gt_flat) ** 2, axis=-1)))
-            aux["motif_rmsd_all_atom"] = jax.lax.stop_gradient(rmsd_aa)
-
-        seq_probs = jax.nn.softmax(sequence, axis=-1)
-        assigned_seq = jnp.einsum("nm,na->ma", assignment, seq_probs)
-        seq_ce = -(self.motif_pssm * jnp.log(assigned_seq + 1e-10)).sum(axis=-1).mean()
-
-        row_sums = assignment.sum(axis=1)
-        collision = jnp.sum(jax.nn.relu(row_sums - 1.0))
-
-        motif_idxs = jnp.argmax(assignment, axis=0)
-        aux.update({
-            "motif_seq_ce": seq_ce,
-            "motif_collision": collision,
-            "motif_idxs": motif_idxs,
-        })
-        return rmsd_ca + seq_ce + collision, aux
-
 
 def _find_best_assignment_positions(assignment, pred_ca, gt_ca, top_k):
     """Find best motif positions by enumerating top-K from the assignment matrix.
@@ -585,82 +488,50 @@ def _find_best_positions(pred_dist, gt_dist, top_k):
 
 
 class GeometricUnindexedRMSD(LossTerm):
-    """Hybrid unindexed scaffolding loss (Approach 1+2).
+    """Hybrid unindexed scaffolding loss (CA-only RMSD + geometric search).
 
-    Combines geometric distogram matching (approach 2) with a persistent soft
-    assignment matrix (approach 1). Each forward pass:
+    Combines geometric distogram matching with a persistent soft assignment
+    matrix. Each forward pass:
     1. Finds best geometric match via distogram → geo_motif_idxs (stop_gradient)
-    2. If assignment is set: uses soft assignment for differentiable RMSD + seq_ce
-       (approach 1), returns geo_motif_idxs in aux for the optimizer to use as a vote
-    3. If assignment is None: falls back to pure geometric mode (hard indices)
+    2. Uses soft assignment for differentiable CA RMSD + seq_ce, returns
+       geo_motif_idxs in aux for the optimizer to use as a vote
+
+    For side-chain RMSD, use a separate UnindexedSideChainRMSD instance.
     """
     gt_coords: Float[Array, "M 4 3"]
     gt_distogram: Float[Array, "M M"]
     motif_pssm: Float[Array, "M 20"]
-    assignment: Float[Array, "N M"] | None
-    _mode: str
-    _gt_atom37_coords: Float[Array, "M 37 3"] | None
-    _gt_atom37_mask: Float[Array, "M 37"] | None
-    _atom_idx: Array | None
-    _gt_flat: Float[Array, "n_atoms 3"] | None
+    assignment: Float[Array, "N M"]
     _top_k: int
     _seq_ce_weight: float
-    _use_all_atom_loss: bool
     _assign_top_k: int
+    _geo_enabled: bool
     name: str = "geometric_unindexed_rmsd"
 
     def __init__(self, gt_coords, gt_distogram, motif_pssm, assignment=None,
                  name: str = "geometric_unindexed_rmsd",
-                 mode: str = "ca_only", top_k: int = 15,
+                 top_k: int = 15,
                  seq_ce_weight: float = 10.0,
-                 assign_top_k: int = 0,
-                 gt_atom37_coords=None, gt_atom37_mask=None):
+                 assign_top_k: int = 0):
         self.name = name
         self.gt_coords = gt_coords
         self.gt_distogram = gt_distogram
         self.motif_pssm = motif_pssm
         self.assignment = assignment
-        self._mode = mode
-        self._gt_atom37_coords = gt_atom37_coords
-        self._gt_atom37_mask = gt_atom37_mask
         self._top_k = top_k
         self._seq_ce_weight = seq_ce_weight
-        self._use_all_atom_loss = False
         self._assign_top_k = assign_top_k
-
-        if mode == "all_atom":
-            flat_mask = gt_atom37_mask.reshape(-1)
-            n_atoms = int(flat_mask.sum())
-            self._atom_idx = jnp.where(flat_mask, size=n_atoms)[0]
-            self._gt_flat = gt_atom37_coords.reshape(-1, 3)[self._atom_idx]
-        else:
-            self._atom_idx = None
-            self._gt_flat = None
+        self._geo_enabled = True
 
     @classmethod
     def from_scaffold(cls, scaffold: Scaffold, name: str = "geometric_unindexed_rmsd",
-                      mode: str = "ca_only", top_k: int = 15, seq_ce_weight: float = 10.0,
+                      top_k: int = 15, seq_ce_weight: float = 10.0,
                       assign_top_k: int = 0):
-        assert mode in ("ca_only", "all_atom"), \
-            f"Unknown GeometricUnindexedRMSD mode {mode}, available: ca_only, all_atom"
-
-        gt_distogram = scaffold.distogram()
-
-        if mode == "all_atom":
-            a37_coords, a37_mask = scaffold.atom37_coordinates()
-            return cls(
-                gt_coords=scaffold.backbone_coordinates(),
-                gt_distogram=gt_distogram,
-                motif_pssm=scaffold.pssm(),
-                name=name, mode=mode, top_k=top_k, seq_ce_weight=seq_ce_weight,
-                assign_top_k=assign_top_k,
-                gt_atom37_coords=a37_coords, gt_atom37_mask=a37_mask,
-            )
         return cls(
             gt_coords=scaffold.backbone_coordinates(),
-            gt_distogram=gt_distogram,
+            gt_distogram=scaffold.distogram(),
             motif_pssm=scaffold.pssm(),
-            name=name, mode=mode, top_k=top_k, seq_ce_weight=seq_ce_weight,
+            name=name, top_k=top_k, seq_ce_weight=seq_ce_weight,
             assign_top_k=assign_top_k,
         )
 
@@ -670,75 +541,42 @@ class GeometricUnindexedRMSD(LossTerm):
         output: StructureModelOutput,
         key,
     ):
-        # Geometric position discovery (non-differentiable)
-        pred_cb = _compute_cb_coords(output.atom37_coords, output.atom37_mask)
-        pred_dist = _pairwise_distances(pred_cb)
-        geo_motif_idxs = jax.lax.stop_gradient(
-            _find_best_positions(pred_dist, self.gt_distogram, self._top_k)
-        )
+        assignment = self.assignment
 
-        if self.assignment is not None:
-            # HYBRID MODE: soft assignment for differentiable losses
-            assignment = self.assignment
-            pred_ca = jnp.einsum("nm,nd->md", assignment, output.backbone_coordinates[:, 1, :])
-            gt_ca = self.gt_coords[:, 1, :]
-            R, t = kabsch(pred_ca, gt_ca)
-            aligned_ca = pred_ca @ R + t
-            rmsd_ca = jnp.sqrt(jnp.mean(jnp.sum((aligned_ca - gt_ca) ** 2, axis=-1)))
-
-            if self._use_all_atom_loss and self._atom_idx is not None:
-                pred_a37 = jnp.einsum("nm,nad->mad", assignment, output.atom37_coords)
-                pred_flat = pred_a37.reshape(-1, 3)[self._atom_idx]
-                R_aa, t_aa = kabsch(pred_flat, self._gt_flat)
-                aligned_aa = pred_flat @ R_aa + t_aa
-                rmsd_loss = jnp.sqrt(jnp.mean(jnp.sum((aligned_aa - self._gt_flat) ** 2, axis=-1)))
-            else:
-                rmsd_loss = rmsd_ca
-
-            seq_probs = jax.nn.softmax(sequence, axis=-1)
-            assigned_seq = jnp.einsum("nm,na->ma", assignment, seq_probs)
-            seq_ce = -(self.motif_pssm * jnp.log(assigned_seq + 1e-10)).sum(axis=-1).mean()
-
-            row_sums = assignment.sum(axis=1)
-            collision = jnp.sum(jax.nn.relu(row_sums - 1.0))
-
-            motif_idxs = jnp.argmax(assignment, axis=0)
-            # Gate seq_ce by assignment sharpness: off during exploration
-            # (uniform → max≈1/N), full strength once positions commit (max≈1)
-            sharpness = jnp.max(assignment, axis=0).mean()
-            seq_ce_gate = jnp.clip((sharpness - 0.1) / 0.4, 0.0, 1.0)
-            loss = rmsd_loss + self._seq_ce_weight * seq_ce_gate * seq_ce + collision
+        if self._geo_enabled:
+            pred_cb = _compute_cb_coords(output.atom37_coords, output.atom37_mask)
+            pred_dist = _pairwise_distances(pred_cb)
+            geo_motif_idxs = jax.lax.stop_gradient(
+                _find_best_positions(pred_dist, self.gt_distogram, self._top_k)
+            )
         else:
-            # PURE GEOMETRIC MODE: hard indices (for reprediction / standalone)
-            motif_idxs = geo_motif_idxs
-            pred_ca = output.backbone_coordinates[motif_idxs, 1, :]
-            gt_ca = self.gt_coords[:, 1, :]
-            R, t = kabsch(pred_ca, gt_ca)
-            aligned_ca = pred_ca @ R + t
-            rmsd_ca = jnp.sqrt(jnp.mean(jnp.sum((aligned_ca - gt_ca) ** 2, axis=-1)))
+            geo_motif_idxs = jnp.argmax(assignment, axis=0)
 
-            seq_probs = jax.nn.softmax(sequence, axis=-1)
-            pred_seq = seq_probs[motif_idxs]
-            seq_ce = -(self.motif_pssm * jnp.log(pred_seq + 1e-10)).sum(axis=-1).mean()
+        pred_ca = jnp.einsum("nm,nd->md", assignment, output.backbone_coordinates[:, 1, :])
+        gt_ca = self.gt_coords[:, 1, :]
+        R, t = kabsch(pred_ca, gt_ca)
+        aligned_ca = pred_ca @ R + t
+        rmsd_loss = jnp.sqrt(jnp.mean(jnp.sum((aligned_ca - gt_ca) ** 2, axis=-1)))
 
-            collision = jnp.float32(0.0)
-            loss = rmsd_ca + self._seq_ce_weight * seq_ce
+        seq_probs = jax.nn.softmax(sequence, axis=-1)
+        assigned_seq = jnp.einsum("nm,na->ma", assignment, seq_probs)
+        seq_ce = -(self.motif_pssm * jnp.log(assigned_seq + 1e-10)).sum(axis=-1).mean()
 
-        aux = {self.name: rmsd_ca, "motif_rmsd_ca": rmsd_ca}
+        row_sums = assignment.sum(axis=1)
+        collision = jnp.sum(jax.nn.relu(row_sums - 1.0))
 
-        # All-atom RMSD metric (stop_gradient, uses hard indices from assignment or geo)
-        if self._mode == "all_atom":
-            aa_idxs = motif_idxs
-            pred_a37 = output.atom37_coords[aa_idxs]
-            pred_flat = pred_a37.reshape(-1, 3)[self._atom_idx]
-            R_aa, t_aa = kabsch(pred_flat, self._gt_flat)
-            aligned_aa = pred_flat @ R_aa + t_aa
-            rmsd_aa = jnp.sqrt(jnp.mean(jnp.sum((aligned_aa - self._gt_flat) ** 2, axis=-1)))
-            aux["motif_rmsd_all_atom"] = jax.lax.stop_gradient(rmsd_aa)
+        motif_idxs = jnp.argmax(assignment, axis=0)
+        sharpness = jnp.max(assignment, axis=0).mean()
+        seq_ce_gate = jnp.clip((sharpness - 0.1) / 0.4, 0.0, 1.0)
+        loss = rmsd_loss + self._seq_ce_weight * seq_ce_gate * seq_ce + collision
 
-        # Distogram mismatch at geometric match (for logging)
-        geo_sub_dist = pred_dist[geo_motif_idxs][:, geo_motif_idxs]
-        distogram_mismatch = jnp.sqrt(jnp.mean((geo_sub_dist - self.gt_distogram) ** 2))
+        aux = {self.name: rmsd_loss}
+
+        if self._geo_enabled:
+            geo_sub_dist = pred_dist[geo_motif_idxs][:, geo_motif_idxs]
+            distogram_mismatch = jnp.sqrt(jnp.mean((geo_sub_dist - self.gt_distogram) ** 2))
+        else:
+            distogram_mismatch = jnp.float32(0.0)
 
         aux.update({
             "motif_seq_ce": seq_ce,
@@ -748,7 +586,7 @@ class GeometricUnindexedRMSD(LossTerm):
             "geo_motif_idxs": geo_motif_idxs,
         })
 
-        if self._assign_top_k > 0 and self.assignment is not None:
+        if self._assign_top_k > 0:
             assign_best_idxs, assign_best_rmsd = jax.lax.stop_gradient(
                 _find_best_assignment_positions(
                     self.assignment,
@@ -763,10 +601,138 @@ class GeometricUnindexedRMSD(LossTerm):
         return loss, aux
 
 
+class UnindexedSideChainRMSD(LossTerm):
+    """Lightweight side-chain RMSD through the soft assignment matrix.
+
+    Aligns on CA atoms only (matching the evaluation metric), then computes
+    all-atom RMSD on the CA-aligned coordinates. This avoids Kabsch
+    overfitting when the number of motif residues is small.
+
+    Only meaningful once the assignment is committed and amino acid identities
+    are correct at motif positions. Use alongside GeometricUnindexedRMSD
+    (which owns the geometric search, seq_ce, and collision).
+    """
+    _atom_idx: Array
+    _gt_flat: Float[Array, "n_atoms 3"]
+    _gt_ca: Float[Array, "M 3"]
+    _weights: Float[Array, "n_atoms 1"] | None
+    assignment: Float[Array, "N M"]
+    name: str = "unindexed_rmsd_side_chain"
+
+    def __init__(self, gt_atom37_coords, gt_atom37_mask, assignment=None,
+                 name: str = "unindexed_rmsd_side_chain", weighted: bool = False):
+        self.name = name
+        self.assignment = assignment
+
+        self._gt_ca = gt_atom37_coords[:, ATOM37_INDEX["CA"], :]
+
+        mask37 = gt_atom37_mask.copy()
+        backbone_idx = jnp.array([0, 2, 4])  # N, C, O (keep CA at index 1)
+        mask37 = mask37.at[:, backbone_idx].set(0.0)
+        flat_mask = mask37.reshape(-1)
+        n_atoms = int(flat_mask.sum())
+        self._atom_idx = jnp.where(flat_mask, size=n_atoms)[0]
+        self._gt_flat = gt_atom37_coords.reshape(-1, 3)[self._atom_idx]
+
+        if weighted:
+            n_res = mask37.shape[0]
+            atoms_per_res = mask37.sum(-1, keepdims=True)
+            per_atom_w = jnp.where(mask37, 1.0 / (n_res * atoms_per_res + 1e-8), 0.0)
+            self._weights = per_atom_w.reshape(-1)[self._atom_idx][..., None]
+        else:
+            self._weights = None
+
+    @classmethod
+    def from_scaffold(cls, scaffold: Scaffold,
+                      name: str = "unindexed_rmsd_side_chain",
+                      weighted: bool = False):
+        a37_coords, a37_mask = scaffold.atom37_coordinates()
+        return cls(gt_atom37_coords=a37_coords, gt_atom37_mask=a37_mask,
+                   name=name, weighted=weighted)
+
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: StructureModelOutput,
+        key,
+    ):
+        assignment = self.assignment
+        pred_a37 = jnp.einsum("nm,nad->mad", assignment, output.atom37_coords)
+
+        pred_ca = pred_a37[:, ATOM37_INDEX["CA"], :]
+        R, t = kabsch(pred_ca, self._gt_ca)
+
+        pred_flat = pred_a37.reshape(-1, 3)[self._atom_idx]
+        aligned = pred_flat @ R + t
+
+        if self._weights is not None:
+            msd = (self._weights * jnp.square(aligned - self._gt_flat)).sum((-1, -2))
+        else:
+            msd = jnp.mean(jnp.sum((aligned - self._gt_flat) ** 2, axis=-1))
+
+        rmsd = jnp.sqrt(msd)
+        return rmsd, {self.name: rmsd}
+
+
+class UnindexedDistogramCCE(LossTerm):
+    """Distogram cross-entropy loss for unindexed scaffolding.
+
+    Uses the soft assignment matrix to extract motif-pair distogram logits
+    from the full [N, N, n_bins] prediction, then computes CCE against the
+    ground-truth motif distogram — the same supervision signal as the indexed
+    DistogramCCE but compatible with learnable position assignment.
+    """
+    gt_distogram: Float[Array, "M M"]
+    assignment: Float[Array, "N M"] | None
+    name: str = "unindexed_dgramm_cce"
+
+    def __init__(self, gt_distogram, assignment=None,
+                 name: str = "unindexed_dgramm_cce"):
+        self.gt_distogram = gt_distogram
+        self.assignment = assignment
+        self.name = name
+
+    @classmethod
+    def from_scaffold(cls, scaffold: Scaffold,
+                      name: str = "unindexed_dgramm_cce"):
+        return cls(gt_distogram=scaffold.distogram(), name=name)
+
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: StructureModelOutput,
+        key,
+    ):
+        if self.assignment is None:
+            return jnp.float32(0.0), {self.name: jnp.float32(0.0)}
+
+        assignment = self.assignment  # [N, M]
+        pred_logits = output.distogram_logits  # [N, N, n_bins]
+        num_bins = pred_logits.shape[-1]
+
+        # Soft-extract [M, M, n_bins] via double einsum through assignment
+        motif_logits = jnp.einsum(
+            "ni,nkb,kj->ijb", assignment, pred_logits, assignment
+        )  # [M, M, n_bins]
+
+        # Bin the ground-truth distances (same logic as indexed DistogramCCE)
+        bin_edges = jnp.linspace(
+            output.distogram_bins[0], output.distogram_bins[-1], num_bins - 1
+        )
+        gt_indices = (self.gt_distogram[..., None] > bin_edges).sum(-1)
+        gt_one_hot = jax.nn.one_hot(gt_indices, num_classes=num_bins)
+
+        loss = -jnp.sum(
+            gt_one_hot * jax.nn.log_softmax(motif_logits, axis=-1), axis=-1
+        )
+        dgramm_cce = jnp.mean(loss)
+        return dgramm_cce, {self.name: dgramm_cce}
+
+
 def set_assignment(loss, assignment):
     """Set assignment on all unindexed loss instances in a composed loss tree."""
     def _is_unindexed(x):
-        return isinstance(x, (UnindexedRMSD, GeometricUnindexedRMSD))
+        return isinstance(x, (GeometricUnindexedRMSD, UnindexedSideChainRMSD, UnindexedDistogramCCE))
     def update(leaf):
         if _is_unindexed(leaf):
             return eqx.tree_at(
@@ -788,15 +754,16 @@ def set_seq_ce_weight(loss, seq_ce_weight):
     return jax.tree.map(update, loss, is_leaf=_is_geo)
 
 
-def set_use_all_atom_loss(loss, use_all_atom_loss: bool):
-    """Set _use_all_atom_loss on all GeometricUnindexedRMSD instances in a loss tree."""
+def set_geo_enabled(loss, enabled: bool):
+    """Enable/disable geometric search on all GeometricUnindexedRMSD instances."""
     def _is_geo(x):
         return isinstance(x, GeometricUnindexedRMSD)
     def update(leaf):
         if _is_geo(leaf):
-            return eqx.tree_at(lambda l: l._use_all_atom_loss, leaf, use_all_atom_loss)
+            return eqx.tree_at(lambda l: l._geo_enabled, leaf, enabled)
         return leaf
     return jax.tree.map(update, loss, is_leaf=_is_geo)
+
 
 
 if __name__ == "__main__":
@@ -876,35 +843,10 @@ if __name__ == "__main__":
         backbone_coordinates=pred_backbone_coords,
     )
 
-    rmsd_loss = UnindexedRMSD.from_scaffold(scaffold=scaffold)
-    v, aux = rmsd_loss(
-        sequence=pssm,
-        output=output,
-        key=jax.random.key(42),
-    )
-    print(f"RMSD (random pred): {v}")
-    print(f"aux: {aux}")
+    geo_loss = GeometricUnindexedRMSD.from_scaffold(scaffold=scaffold)
+    print(f"GeometricUnindexedRMSD created: {geo_loss.name}")
 
-    # --- zero-loss verification: GT backbone as prediction ---
-    print(f"\n{'='*60}")
-    print(f"  RMSD zero-loss verification (GT as prediction)")
-    print(f"{'='*60}")
-
-    gt_bb = np.array(scaffold.backbone_coordinates())  # [M, 4, 3]
-
-    gt_output = SimpleNamespace(
-        backbone_coordinates=gt_bb,
-    )
-    gt_pssm = np.zeros((scaffold_length, 20))
-    for i, aa in enumerate(scaffold.motif_sequence):
-        if aa in TOKENS:
-            gt_pssm[i, TOKENS.index(aa)] = 1.0
-
-    v_gt, aux_gt = rmsd_loss(
-        sequence=gt_pssm,
-        output=gt_output,
-        key=jax.random.key(42),
-    )
-    print(f"RMSD (GT pred): {v_gt}")
-    print(f"aux: {aux_gt}")
+    dgramm_loss = UnindexedDistogramCCE.from_scaffold(scaffold=scaffold)
+    print(f"UnindexedDistogramCCE created: {dgramm_loss.name}")
+    print(f"gt_distogram shape: {dgramm_loss.gt_distogram.shape}")
 
