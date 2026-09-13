@@ -29,7 +29,7 @@ class AbLangPseudoLikelihood(LossTerm):
     name: str = "ablang_pll"
 
 
-    def __call__(self, seq_standard_tokens: Float[Array, "N 20"], *, key):
+    def __call__(self, seq_standard_tokens: Float[Array, "N 20"], *, key, **kwargs):
         n = seq_standard_tokens.shape[0]
         # convert from standard tokenization to ablang tokenization
         ablang_toks_unpadded = seq_standard_tokens @ boltz_to_ablang_matrix(self.tokenizer)

@@ -263,6 +263,7 @@ class DistogramCCE(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         # create gt distogram for scaffolded positions
         pred_logits  = output.distogram_logits[self._idx][:, self._idx]
@@ -304,6 +305,7 @@ class FAPE(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         def robust_norm(x, eps=1e-8):
             return jnp.sqrt(jnp.square(x).sum(axis=-1) + eps)
@@ -396,6 +398,7 @@ class RMSD(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         if self._mode in ("all_atom", "side_chain"):
             pred = output.atom37_coords[self._idx].reshape(-1, 3)[self._atom_idx]
@@ -433,6 +436,7 @@ class MaskedPLDDTLoss(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         binder_len = sequence.shape[0]
         plddt = output.plddt[:binder_len][self._idx]

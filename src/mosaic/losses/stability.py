@@ -25,6 +25,7 @@ class StabilityModel(LossTerm):
         seq_standard_tokens: Float[Array, "N 20"],
         *,
         key,
+        **kwargs,
     ):
         # convert from standard tokenization to ESM tokenization
         # add cls and eos tokens

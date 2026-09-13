@@ -88,6 +88,7 @@ class FixedStructureInverseFoldingLL(LossTerm):
         binder_sequence: Float[Array, "N 20"],
         *,
         key,
+        **kwargs,
     ):
         binder_length = binder_sequence.shape[0]
         complex_length = self.sequence_boltz.shape[0]
@@ -190,6 +191,7 @@ class ProteinMPNNLoss(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         # Get the atoms required for proteinMPNN:
         # In order these are N, C-alpha, C, O
@@ -335,6 +337,7 @@ class InverseFoldingSequenceRecovery(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         sequences = jax.vmap(
             lambda k: jax.nn.one_hot(
@@ -391,6 +394,7 @@ class AllResiduePLLLoss(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         binder_length = sequence.shape[0]
         total_length = output.full_sequence.shape[0]

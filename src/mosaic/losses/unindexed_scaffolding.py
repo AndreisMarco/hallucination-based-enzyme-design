@@ -24,11 +24,9 @@ class Scaffold:
 
         if self.structure_path.endswith(".pdb"):
             pdb_file = pdb.PDBFile.read(self.structure_path)
-            self.file_type = "pdb"
             structure = pdb.get_structure(pdb_file, model=1)
         elif self.structure_path.endswith(".cif"):
             cif_file = pdbx.CIFFile.read(self.structure_path)
-            self.file_type = "cif"
             structure = pdbx.get_structure(cif_file, model=1)
         else:
             raise ValueError("File must be .pdb or .cif")

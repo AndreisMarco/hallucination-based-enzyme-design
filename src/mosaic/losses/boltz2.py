@@ -106,7 +106,7 @@ class StructureWriter:
         self.out_dir = output_dir
         self.temp_dir_handle = temp_dir_handle
 
-    def __call__(self, sample_atom_coords) -> gemmi.Structure:
+    def __call__(self, sample_atom_coords, **kwargs) -> gemmi.Structure:
         confidence = torch.ones(1)
 
         pred_dict = {
@@ -233,7 +233,7 @@ def set_binder_sequence(
     # zero out non-standard AA types
     zero_padded_sequence = jnp.pad(new_sequence, ((0, 0), (2, 11)))
     n_msa = features["msa"].shape[1]
-    print("n_msa", n_msa)
+    # print("n_msa", n_msa)
 
     # We assume there are no MSA hits for the binder sequence
     binder_profile = jnp.zeros_like(features["profile"][0, :binder_len])
@@ -397,7 +397,7 @@ class Boltz2Loss(LossTerm):
     initial_recycling_state: TrunkState | None = None
     features_to_log: list[str] | None = None
 
-    def __call__(self, sequence: Float[Array, "N 20"], key=None):
+    def __call__(self, sequence: Float[Array, "N 20"], key=None, **kwargs):
         """Compute the loss for a given sequence."""
         features = set_binder_sequence(sequence, self.features)
 
@@ -415,7 +415,7 @@ class Boltz2Loss(LossTerm):
             key=key,
         )
 
-        v, aux = self.loss(sequence=sequence, output=output, key=key)
+        v, aux = self.loss(sequence=sequence, output=output, key=key, **kwargs)
 
         # Include any additional specified features
         if self.features_to_log is None:
@@ -451,7 +451,7 @@ class MultiSampleBoltz2Loss(LossTerm):
         - features_to_log: a list of str corresponding to elements of the features dictionary, to add to the aux from the loss function.
     """
 
-    def __call__(self, sequence: Float[Array, "N 20"], key=None):
+    def __call__(self, sequence: Float[Array, "N 20"], key=None, **kwargs):
         """Compute the loss for a given sequence."""
         features = set_binder_sequence(sequence, self.features)
 
@@ -470,7 +470,7 @@ class MultiSampleBoltz2Loss(LossTerm):
                 deterministic=self.deterministic,
                 key=key,
             )
-            return self.loss(sequence=sequence, output=output, key=key)
+            return self.loss(sequence=sequence, output=output, key=key, **kwargs)
 
         vs, auxs = jax.vmap(apply_loss_to_single_sample)(
             jax.random.split(key, self.num_samples)

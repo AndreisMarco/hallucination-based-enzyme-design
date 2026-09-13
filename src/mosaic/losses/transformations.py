@@ -13,10 +13,10 @@ class NoCys(LossTerm):
     """ Precompose loss with function that inserts zero probability for Cysteine (C) in the sequence logits.
         If using this loss, be sure to call `loss.sequence(jax.nn.softmax(logits))` after optimization to get the final sequence!"""
 
-    def __call__(self, seq: Float[Array, "N 19"], *, key):
+    def __call__(self, seq: Float[Array, "N 19"], *, key, **kwargs):
         assert seq.shape[-1] == 19
 
-        return self.loss(self.sequence(seq), key=key)
+        return self.loss(self.sequence(seq), key=key, **kwargs)
 
     @staticmethod
     def sequence(seq: Float[Array, "N 19"]):
@@ -95,9 +95,9 @@ class SetPositions(LossTerm):
     variable_positions: Int[Array, "M"] = eqx.field(converter=jnp.array)
     loss: LossTerm | LinearCombination
 
-    def __call__(self, seq: Float[Array, "M 20"], *, key):
+    def __call__(self, seq: Float[Array, "M 20"], *, key, **kwargs):
         assert seq.shape == (len(self.variable_positions), len(TOKENS))
-        return self.loss(self.sequence(seq), key=key)
+        return self.loss(self.sequence(seq), key=key, **kwargs)
 
     def sequence(self, seq: Float[Array, "M 20"]):
         return (
@@ -123,7 +123,7 @@ class FixedPositionsPenalty(LossTerm):
     target: Float[Array, "N 20"] = eqx.field(converter=jnp.array)
     name: str = "fixed_position_penalty"
 
-    def __call__(self, seq: Float[Array, "N 20"], *, key):
+    def __call__(self, seq: Float[Array, "N 20"], *, key, **kwargs):
         r = (((seq - self.target) ** 2).sum(-1) * self.position_mask).sum()
         return r, {self.name: r}
 

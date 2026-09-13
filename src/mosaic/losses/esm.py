@@ -57,7 +57,7 @@ class ESM2PseudoLikelihood(LossTerm):
     stop_grad: bool = True
     name: str = "esm_pll"
 
-    def __call__(self, seq_standard_tokens: Float[Array, "N 20"], *, key):
+    def __call__(self, seq_standard_tokens: Float[Array, "N 20"], *, key, **kwargs):
         n = seq_standard_tokens.shape[0]
         # convert from standard tokenization to ESM tokenization
         esm_toks_unpadded = seq_standard_tokens @ boltz_to_esm_matrix()

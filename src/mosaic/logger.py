@@ -2,10 +2,6 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
-import matplotlib.pyplot as plt
-import wandb
-from matplotlib.animation import PillowWriter
-from matplotlib.transforms import ScaledTranslation
 
 from mosaic.common import TOKENS
 
@@ -29,6 +25,8 @@ def _group_losses(losses: dict) -> dict[str, list[tuple[str, np.ndarray]]]:
     return groups
 
 def plot_losses(loss: np.ndarray, additional_losses: dict[np.ndarray] | None = None):
+    import matplotlib.pyplot as plt
+    from matplotlib.transforms import ScaledTranslation
     steps = range(len(loss))
 
     handles, labels = [], []
@@ -40,7 +38,7 @@ def plot_losses(loss: np.ndarray, additional_losses: dict[np.ndarray] | None = N
         legend_lines += sum(len(g) + (1 if p else 0) for p, g in groups.items())
 
     all_names = [n for g in groups.values() for n, _ in g]
-    max_name_len = max((len(n) for n in all_names))
+    max_name_len = max((len(n) for n in all_names), default=0)
     legend_width = (max_name_len + 30) * 0.065 + 0.5
     fig_h = max(4, legend_lines * 0.35)
     fig, ax = plt.subplots(figsize=(10 + legend_width, fig_h))
@@ -81,6 +79,7 @@ def plot_losses(loss: np.ndarray, additional_losses: dict[np.ndarray] | None = N
     return fig
 
 def plot_pssm_heatmap(pssm, ax=None, return_wandb_image: bool = False):
+    import matplotlib.pyplot as plt
     seq_len = pssm.shape[0]
     aa_labels = list(TOKENS)
     if ax is None:
@@ -97,12 +96,15 @@ def plot_pssm_heatmap(pssm, ax=None, return_wandb_image: bool = False):
     fig.tight_layout()
 
     if return_wandb_image:
+        import wandb
         wandb_image = wandb.Image(fig)
         plt.close(fig)
         return wandb_image
     return fig
 
 def make_pssm_video(pssm_trajectory, output_path: str = "pssm_trajectory.gif", fps: int = 10):
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import PillowWriter
     n_steps = pssm_trajectory.shape[0]
     fig, ax = plt.subplots(1, 1, figsize=(4, 12))
     writer = PillowWriter(fps=fps)
@@ -206,7 +208,7 @@ class TrajectoryLogger:
             return len(self.trajectory_list["optim"]["pssm"])
         elif self.trajectory is not None:
             return len(self.trajectory["optim"]["pssm"])
-        return len(self.traj)
+        return 0
 
     def __add__(self, other):
         merged = TrajectoryLogger(is_leaf=self.is_leaf)
@@ -242,7 +244,7 @@ class TrajectoryLogger:
             )
         else:
             raise RuntimeError(
-                    "Both loggers must have trajectory_list or trajectory to be added."
+                    "Both loggers must have trajectory_list or trajectory to be added. "
                     "Call clean_trajectory() on each first, or ensure trajectory_list is available."
                 )
         return merged
@@ -271,7 +273,7 @@ class TrajectoryLogger:
     def clean_trajectory(self, keep_trajectory_list=False):
         if self.trajectory_list is None:
             raise RuntimeError(
-                "Logger does not have trajectory_list to be cleaned."
+                "Logger does not have trajectory_list to be cleaned. "
                 "If logger was loaded from file, it already has a trajectory."
             )
         # Stack arrays where shape is constant across steps
@@ -339,6 +341,7 @@ class TrajectoryLogger:
                 loss=self.trajectory["optim"]["loss"],
                 additional_losses=losses_dict,
             )
+            import matplotlib.pyplot as plt
             fig.savefig(log_path / "losses.png")
             plt.close(fig)
 

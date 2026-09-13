@@ -137,6 +137,7 @@ class WithinBinderContact(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         binder_len = sequence.shape[0]
         log_contact_intra = contact_cross_entropy(
@@ -181,6 +182,7 @@ class ColabDesignContactLoss(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         binder_len = sequence.shape[0]
         dgram = output.distogram_logits[:binder_len, :binder_len]
@@ -226,6 +228,7 @@ class BinderTargetContact(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         binder_len = sequence.shape[0]
         log_contact_inter = contact_cross_entropy(
@@ -265,6 +268,7 @@ class HelixLoss(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         binder_len = sequence.shape[0]
         log_contact = contact_log_probability(
@@ -288,6 +292,7 @@ class DistogramRadiusOfGyration(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         # TODO: Why RMSE instead of MAE?
         binder_len = sequence.shape[0]
@@ -322,6 +327,7 @@ class MAERadiusOfGyration(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         binder_len = sequence.shape[0]
 
@@ -355,6 +361,7 @@ class DistogramCE(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         binder_len = sequence.shape[0]
         # expand dims so self.f is broadcastable to network_output["pdistogram"] of size (N, N, Bins)
@@ -380,6 +387,7 @@ class PLDDTLoss(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         binder_len = sequence.shape[0]
         plddt = output.plddt[:binder_len].mean()
@@ -394,6 +402,7 @@ class WithinBinderPAE(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         binder_len = sequence.shape[0]
         pae_within = jnp.fill_diagonal(
@@ -410,6 +419,7 @@ class BinderTargetPAE(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         binder_len = sequence.shape[0]
         pae = output.pae[:binder_len, binder_len:].mean()
@@ -424,6 +434,7 @@ class TargetBinderPAE(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         binder_len = sequence.shape[0]
         pae = output.pae[binder_len:, :binder_len].mean()
@@ -438,6 +449,7 @@ class IPTMLoss(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         # binder - target iptm -- we override asym-id in the case of multi-chain targets
         N = output.full_sequence.shape[0]
@@ -461,6 +473,7 @@ class BinderTargetIPTM(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         # binder - target iptm -- we override asym-id in the case of multi-chain targets
         N = output.full_sequence.shape[0]
@@ -484,6 +497,7 @@ class BinderPTMLoss(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         binder_len = sequence.shape[0]
         num_res = output.full_sequence.shape[0]
@@ -506,6 +520,7 @@ class BinderTargetIPSAE(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         N = output.full_sequence.shape[0]
         binder_len = sequence.shape[0]
@@ -533,6 +548,7 @@ class TargetBinderIPSAE(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         N = output.full_sequence.shape[0]
         binder_len = sequence.shape[0]
@@ -559,6 +575,7 @@ class IPSAE_min(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         bt_ipsae = (
             -1
@@ -594,6 +611,7 @@ class ActualRadiusOfGyration(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         binder_len = sequence.shape[0]
         first_atom_coords = output.backbone_coordinates[:binder_len, 1]
@@ -612,6 +630,7 @@ class pTMEnergy(LossTerm):
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
+        **kwargs,
     ):
         len_binder = sequence.shape[0]
         logits = output.pae_logits

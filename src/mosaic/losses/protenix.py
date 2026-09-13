@@ -98,7 +98,7 @@ def set_binder_sequence(new_sequence: Float[Array, "N 20"], features: PyTree,
     protenix_sequence = new_sequence @ BOLTZ_TO_PROTENIX
     scaled_sequence = protenix_sequence * restype_scale
     n_msa = features["msa"].shape[0]
-    print("n_msa", n_msa)
+    # print("n_msa", n_msa)
 
     zero_msa_idx = 20  # GAP #31#20
     n_fake_seq = 1
@@ -308,7 +308,7 @@ class MultiSampleProtenixLoss(LossTerm):
         - features_to_log: a list of str corresponding to elements of the features dictionary, to add to the aux from the loss function.
     """
 
-    def __call__(self, sequence: Float[Array, "N 20"], key):
+    def __call__(self, sequence: Float[Array, "N 20"], key, **kwargs):
         """Compute the loss for a given sequence."""
         # Set the binder sequence in the features
         features = set_binder_sequence(sequence, self.features,
@@ -342,6 +342,7 @@ class MultiSampleProtenixLoss(LossTerm):
                 sequence=sequence,
                 output=output,
                 key=key,
+                **kwargs,
             )
 
             return v, aux

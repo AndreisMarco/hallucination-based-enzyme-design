@@ -3,11 +3,12 @@
 Fork of colabdesign_optimizer that co-optimizes a soft assignment matrix [N, M]
 alongside the PSSM [N, 20]. The two are kept as separate arrays — the PSSM
 flows through the standard loss pipeline while the assignment is placed on
-UnindexedRMSD via set_assignment before each forward pass.
+unindexed loss terms via set_assignment before each forward pass.
 """
 from __future__ import annotations
 
 import time
+from itertools import permutations
 from typing import Callable
 
 import equinox as eqx
@@ -15,12 +16,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float
+from scipy.special import softmax as scipy_softmax
 
 from mosaic.logger import TrajectoryLogger
 from mosaic.losses.unindexed_scaffolding import (
     set_assignment,
     set_seq_ce_weight,
-    set_use_all_atom_loss,
 )
 from mosaic.optimizers import (
     _print_iter,
@@ -73,8 +74,7 @@ def _ste_argmax(x):
 @eqx.filter_jit
 def _eval_unindexed(loss, pssm_params, assign_params, key,
                     alpha, temp, soft_weight, hard_weight, assign_temp,
-                    freeze_assignment=False, seq_ce_weight=None,
-                    use_all_atom_loss=False):
+                    freeze_assignment=False, seq_ce_weight=None):
     """Forward pass with separate PSSM and assignment gradients."""
     def forward(pssm_params, assign_params):
         scaled = pssm_params * alpha
@@ -90,8 +90,6 @@ def _eval_unindexed(loss, pssm_params, assign_params, key,
         loss_modified = set_assignment(loss, assignment)
         if seq_ce_weight is not None:
             loss_modified = set_seq_ce_weight(loss_modified, seq_ce_weight)
-        if use_all_atom_loss:
-            loss_modified = set_use_all_atom_loss(loss_modified, True)
         return loss_modified(pseudo, key=key)
 
     (v, aux), (g_pssm, g_assign) = jax.value_and_grad(
@@ -112,6 +110,7 @@ def unindexed_colabdesign_optimizer(
     learning_rate: float = 0.1,
     assign_learning_rate: float | None = None,
     geo_learning_rate: float = 0.0,
+    e_geo_learning_rate: float | None = None,
     assign_vote_learning_rate: float = 0.0,
     commit_threshold: float | None = None,
     alpha: float = 2.0,
@@ -134,7 +133,6 @@ def unindexed_colabdesign_optimizer(
     frozen_positions: list[int] | None = None,
     freeze_assignment: bool = False,
     seq_ce_weight: float | None = None,
-    use_all_atom_loss: bool = False,
 ):
     """ColabDesign optimizer with co-optimized assignment matrix.
 
@@ -143,7 +141,7 @@ def unindexed_colabdesign_optimizer(
     the assignment gets temperature-annealed softmax over positions (axis=0).
 
     Args:
-        loss_function: Mosaic loss (eqx.Module with UnindexedRMSD inside).
+        loss_function: Mosaic loss (eqx.Module with unindexed loss terms inside).
         pssm: Initial PSSM logits [N, 20].
         assign: Initial assignment logits [N, M].
         n_steps: Total optimization steps.
@@ -204,6 +202,10 @@ def unindexed_colabdesign_optimizer(
         hard_i = hard + (e_hard - hard) * t
         step_i = step + (e_step - step) * t
         assign_temp_i = e_assign_temp + (assign_temp - e_assign_temp) * (1 - t) ** 2
+        if e_geo_learning_rate is not None:
+            geo_lr_i = geo_learning_rate + (e_geo_learning_rate - geo_learning_rate) * t
+        else:
+            geo_lr_i = geo_learning_rate
 
         lr_scale = step_i * ((1 - soft_i) + (soft_i * temp_i))
         lr_pssm_i = lr_pssm * lr_scale
@@ -218,7 +220,6 @@ def unindexed_colabdesign_optimizer(
             jnp.float32(temp_i), jnp.float32(soft_i),
             jnp.float32(hard_i), jnp.float32(assign_temp_i),
             freeze_assignment=freeze_assignment,
-            use_all_atom_loss=use_all_atom_loss,
             **_seq_ce_kw,
         )
 
@@ -243,16 +244,29 @@ def unindexed_colabdesign_optimizer(
             assign_params = np.array(assign_params - lr_assign_i * g_assign, dtype=np.float32)
 
             # Geometric vote: increment logits at positions found by distogram matching
-            if geo_learning_rate > 0:
+            if geo_lr_i > 0:
                 geo_idxs = _extract_geo_motif_idxs(aux)
                 if geo_idxs is not None:
                     geo_idxs = np.array(geo_idxs, dtype=int)
                     M = assign_params.shape[1]
+                    if M > 1:
+                        assign_probs = scipy_softmax(
+                            assign_params / max(assign_temp_i, 0.01), axis=0
+                        )
+                        best_score = -1.0
+                        best_perm_idxs = geo_idxs.copy()
+                        for perm in permutations(range(M)):
+                            perm_idxs = geo_idxs[list(perm)]
+                            score = sum(assign_probs[perm_idxs[m], m] for m in range(M))
+                            if score > best_score:
+                                best_score = score
+                                best_perm_idxs = perm_idxs
+                        geo_idxs = best_perm_idxs
                     geo_vote = np.zeros_like(assign_params)
                     for m_idx in range(M):
                         geo_vote[geo_idxs[m_idx], m_idx] = 1.0
                     assign_params = np.array(
-                        assign_params + geo_learning_rate * geo_vote, dtype=np.float32
+                        assign_params + geo_lr_i * geo_vote, dtype=np.float32
                     )
 
             # Assignment vote: increment logits at positions found by top-k RMSD enumeration

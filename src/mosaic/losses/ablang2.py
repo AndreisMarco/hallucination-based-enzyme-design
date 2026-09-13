@@ -69,7 +69,7 @@ class Ablang2PseudoLikelihood(LossTerm):
         )
         self.mask_onehot = jax.nn.one_hot(tokenizer.aa_to_token["*"], self.vocab_size)
 
-    def __call__(self, seq_standard_tokens, *, key):
+    def __call__(self, seq_standard_tokens, *, key, **kwargs):
         del key
         n = seq_standard_tokens.shape[0]
         designable_positions = (

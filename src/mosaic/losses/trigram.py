@@ -76,7 +76,7 @@ class TrigramLL(LossTerm):
     stop_grad: bool = False
     name: str = "trigram_ll"
 
-    def __call__(self, soft_sequence: Float[Array, "N 20"], *, key):
+    def __call__(self, soft_sequence: Float[Array, "N 20"], *, key, **kwargs):
         # Expected log likelihood of the soft sequence under the trigram model
         # if each position is independent: if s_i ~ Categorical(soft_sequence[i]),
         # this equals E_s[\sum_i log p(s_i | s_{i-1}, s_{i-2})].
@@ -120,7 +120,7 @@ class UnigramExcess(LossTerm):
     nat: Float[Array, "20"]
     name: str = "unigram_excess"
 
-    def __call__(self, soft_sequence: Float[Array, "N 20"], *, key=None):
+    def __call__(self, soft_sequence: Float[Array, "N 20"], *, key=None, **kwargs):
         emp = soft_sequence.mean(0)
         v = (jax.nn.relu(emp - self.nat) ** 2).sum()
         return v, {"unigram_excess": v}
@@ -137,7 +137,7 @@ class BigramExcess(LossTerm):
     nat: Float[Array, "20 20"]
     name: str = "bigram_excess"
 
-    def __call__(self, soft_sequence: Float[Array, "N 20"], *, key=None):
+    def __call__(self, soft_sequence: Float[Array, "N 20"], *, key=None, **kwargs):
         N = soft_sequence.shape[0]
         emp = jnp.einsum("ia,ib->ab", soft_sequence[:-1], soft_sequence[1:]) / (N - 1)
         v = (jax.nn.relu(emp - self.nat) ** 2).sum()

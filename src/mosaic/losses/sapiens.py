@@ -84,7 +84,7 @@ class SapiensPseudoLikelihood(LossTerm):
     stop_grad: bool = True
     name: str = "sapiens_pll"
 
-    def __call__(self, seq_standard_tokens: Float[Array, "N 20"], *, key):
+    def __call__(self, seq_standard_tokens: Float[Array, "N 20"], *, key, **kwargs):
         n = seq_standard_tokens.shape[0]
 
         # Convert from standard 20-token space to Sapiens 25-token space

@@ -198,7 +198,7 @@ class MultiSampleOF3Loss(LossTerm):
     reduction: any = jnp.mean
     features_to_log: list[str] | None = None
 
-    def __call__(self, sequence: Float[Array, "N 20"], key):
+    def __call__(self, sequence: Float[Array, "N 20"], key, **kwargs):
         batch = set_binder_sequence(sequence, self.batch)
 
         init_emb, trunk_emb = self.model.run_trunk(
@@ -214,7 +214,7 @@ class MultiSampleOF3Loss(LossTerm):
                 sampling_steps=self.sampling_steps,
                 key=key,
             )
-            return self.loss(sequence=sequence, output=output, key=key)
+            return self.loss(sequence=sequence, output=output, key=key, **kwargs)
 
         vs, auxs = jax.vmap(single_sample)(jax.random.split(key, self.num_samples))
         sortperm = jnp.argsort(vs)
