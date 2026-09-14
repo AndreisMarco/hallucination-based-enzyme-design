@@ -1,0 +1,11 @@
+input_dir: ./dataset
+experiment_name: default
+model: protenix_2025
+step_counts: [1, 2, 5, 10, 15, 20]
+recycling_steps: 4
+n_replicates: 5
+seed: 0
+bf16: true
+use_msa: false
+chain_id: null
+max_proteins: null
