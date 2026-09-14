@@ -1,4 +1,4 @@
-This repository contains the code for the Master thesis focused expanding the Mosaic, an hallucination-based binder design codebase, with active-site scaffolding capabilities.
+This repository contains the code for the Master thesis focused expanding the Mosaic, an hallucination-based binder design codebase, with active-site scaffolding capabilities. \
 The project was supervised by Valentas Brasas and Timothy P. Jenkins at the Digital Biotechnology Lab (DBL) at the Section for Biologics Engineering of DTU.
 
 For an explanation of the Mosaic codebase, refer to the README_mosaic.md (a copy of the README from the original repository).
